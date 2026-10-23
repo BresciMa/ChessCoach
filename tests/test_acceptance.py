@@ -160,6 +160,39 @@ def test_a_failed_reread_stays_lost_without_repeating_the_message():
     assert engine.calls == 0
 
 
+def test_several_missed_moves_are_reread_and_the_advice_uses_the_new_position():
+    start = chess.Board()
+    start.push_san("e4")
+    later = start.copy()
+    for san in ("c6", "Nc3", "d5"):
+        later.push_san(san)
+    opening = board_image(start)
+    picture = board_image(later)
+    session, engine, llm = _session([opening, picture, picture, picture], level=Level.LEVEL_1)
+    session.game.apply(session.game.parse_san("e4"))
+    session.poll(0)
+    session.poll(250)
+    session.poll(350)
+    lines = session.poll(750)
+    assert MSG_BOARD_BACK not in lines
+    assert MSG_BOARD_LOST not in session.messages
+    assert session.game.sans == ["e4", "c6", "Nc3", "d5"]
+    assert session.game.board.board_fen() == later.board_fen()
+    assert engine.calls == 1
+    assert lines
+    assert "d5" in llm.prompts[-1][-1].content
+
+
+def test_calibration_stores_orientation_when_qt_returns_text(tmp_path):
+    path = tmp_path / "config.json"
+    session, _, _ = _session([board_image(chess.Board())])
+    session.config_path = path
+    error = session.set_calibration(0, Rect(0, 0, 320, 320), "black_at_bottom")
+    assert error is None
+    assert session.config.orientation == Orientation.BLACK_AT_BOTTOM
+    assert load_config(path).orientation == Orientation.BLACK_AT_BOTTOM
+
+
 def test_set_level_is_written_when_the_session_has_a_config_path(tmp_path):
     path = tmp_path / "config.json"
     session, _, _ = _session([board_image(chess.Board())])

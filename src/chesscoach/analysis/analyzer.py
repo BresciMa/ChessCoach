@@ -25,8 +25,8 @@ class PositionAnalyzer:
         board = game.board
         side = "white" if board.turn == chess.WHITE else "black"
         hanging, threatened = _attacks(board)
-        last_san, moved_piece, moved_rule = _last_move(board, game.sans)
-        best, candidates = _engine_sans(board, engine)
+        last_san, moved_piece, moved_rule, last_plain = _last_move(board, game.sans)
+        best, candidates, best_plain, candidate_plains = _engine_sans(board, engine)
         evaluation = engine.evaluation_cp if engine is not None else None
         return CoachFacts(
             fen=board.fen(),
@@ -38,6 +38,9 @@ class PositionAnalyzer:
             evaluation_cp=evaluation,
             previous_evaluation_cp=previous_evaluation_cp if evaluation is not None else previous_evaluation_cp,
             best_move_san=best,
+            best_move_plain=best_plain,
+            last_move_plain=last_plain,
+            candidate_moves_plain=candidate_plains,
             candidate_moves_san=candidates,
             hanging_squares=hanging,
             threatened_squares=threatened,
@@ -103,25 +106,48 @@ def _castled(board: chess.Board, color: chess.Color) -> bool:
     return False
 
 
-def _last_move(board: chess.Board, sans: list[str]) -> tuple[str | None, str | None, str | None]:
+def describe_move(board: chess.Board, move: chess.Move) -> str:
+    """Peça, casas e o código SAN, para o texto não ficar só em Ne2."""
+    san = board.san(move)
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return san
+    name = PIECE_NAMES[piece.symbol()]
+    origin = chess.square_name(move.from_square)
+    destination = chess.square_name(move.to_square)
+    if board.is_castling(move):
+        wing = "do rei" if chess.square_file(move.to_square) == 6 else "da dama"
+        return f"{name} roca pelo lado {wing} ({san})"
+    if move.promotion:
+        promoted = PIECE_NAMES[chess.piece_symbol(move.promotion).upper()].split()[0]
+        return f"{name} de {origin} para {destination} e vira {promoted} ({san})"
+    if board.is_capture(move):
+        return f"{name} de {origin} captura em {destination} ({san})"
+    return f"{name} de {origin} para {destination} ({san})"
+
+
+def _last_move(board: chess.Board, sans: list[str]) -> tuple[str | None, str | None, str | None, str | None]:
     if not board.move_stack:
-        return None, None, None
+        return None, None, None, None
     move = board.move_stack[-1]
     san = sans[-1] if sans else None
     probe = board.copy()
     probe.pop()
     piece = probe.piece_at(move.from_square)
     if piece is None:
-        return san, None, None
+        return san, None, None, None
     symbol = piece.symbol()
     rule = PIECE_RULES[symbol.upper()]
-    return san, PIECE_NAMES[symbol], rule
+    return san, PIECE_NAMES[symbol], rule, describe_move(probe, move)
 
 
-def _engine_sans(board: chess.Board, engine: EngineResult | None) -> tuple[str | None, list[str]]:
+def _engine_sans(
+    board: chess.Board, engine: EngineResult | None
+) -> tuple[str | None, list[str], str | None, list[str]]:
     if engine is None:
-        return None, []
+        return None, [], None, []
     found: list[str] = []
+    plains: list[str] = []
     for uci in engine.uci_moves[:3]:
         try:
             move = chess.Move.from_uci(uci)
@@ -132,6 +158,7 @@ def _engine_sans(board: chess.Board, engine: EngineResult | None) -> tuple[str |
         san = board.san(move)
         if san not in found:
             found.append(san)
+            plains.append(describe_move(board, move))
     if not found:
-        return None, []
-    return found[0], found
+        return None, [], None, []
+    return found[0], found, plains[0], plains

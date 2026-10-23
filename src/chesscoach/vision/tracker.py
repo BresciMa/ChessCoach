@@ -249,9 +249,11 @@ class PositionTracker:
             return TrackerResult(TrackerKind.BOARD_LOST)
         found = match_legal_move(self.game.board, changed)
         if found.kind == TrackerKind.NO_CHANGE:
+            if len(changed) > MAX_EXTRA_SQUARES:
+                return TrackerResult(TrackerKind.BOARD_CHECK)
             return TrackerResult(TrackerKind.NO_CHANGE)
         if self._extra_squares(changed, found) > MAX_EXTRA_SQUARES:
-            return TrackerResult(TrackerKind.NO_CHANGE)
+            return TrackerResult(TrackerKind.BOARD_CHECK)
         if found.kind == TrackerKind.AMBIGUOUS:
             return TrackerResult(TrackerKind.AMBIGUOUS, message=MSG_AMBIGUOUS)
         if found.kind == TrackerKind.PROMOTION_NEEDED:

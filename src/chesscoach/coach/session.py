@@ -10,7 +10,7 @@ import chess
 from chesscoach.analysis.analyzer import PositionAnalyzer
 from chesscoach.analysis.facts import CoachFacts
 from chesscoach.capture.screen import MonitorCapture
-from chesscoach.chess.game import ChessGame
+from chesscoach.chess.game import ChessGame, shortest_replays
 from chesscoach.coach.orchestrator import CoachOrchestrator, chat_reason
 from chesscoach.coach.policy import PolicyDecision, StockHelpPolicy
 from chesscoach.config import AppConfig, save_config
@@ -26,7 +26,7 @@ from chesscoach.messages import (
     MSG_UNREADABLE,
     MSG_UNSTABLE,
 )
-from chesscoach.types import Frame, Level, Orientation, Reason, TrackerKind
+from chesscoach.types import Frame, Level, Orientation, Reason, Theme, TrackerKind
 from chesscoach.vision.classifier import PieceClassifier, TemplateClassifier
 from chesscoach.vision.roi import CalibrationError, RoiCalibrator
 from chesscoach.vision.tracker import PositionTracker
@@ -115,8 +115,10 @@ class CoachSession:
         return self.config.arrows_enabled
 
     def set_calibration(self, monitor: int, rect, orientation, theme=None) -> str | None:
+        orientation = Orientation(orientation)
         if theme is None:
             theme = self.config.theme
+        theme = Theme(theme)
         try:
             self.calibrator.set(monitor, rect, orientation, theme)
         except CalibrationError as exc:
@@ -268,6 +270,7 @@ class CoachSession:
         image = self.tracker.last_image
         if image is None:
             return
+        lost = self._board_lost
         before = self.game.fen
         known = self.game.history_known
         side = "w" if self.game.board.turn == chess.WHITE else "b"
@@ -281,14 +284,39 @@ class CoachSession:
             if self.game.fen != before:
                 self.game.load_fen(before, known)
             return
-        self.game.load_fen(found.fen, history_known=False)
+        placement = {item.square: item.piece for item in found.squares if item.piece}
+        paths = shortest_replays(self.game.board, placement)
+        same_pieces = paths == [[]]
+        if len(paths) == 1:
+            for move in paths[0]:
+                self.game.apply(move)
+        else:
+            fen = found.fen
+            if paths:
+                probe = self.game.board.copy()
+                for move in paths[0]:
+                    probe.push(move)
+                fen = _fen_with_turn(found.fen, probe.turn)
+            self.game.load_fen(fen, history_known=False)
         self.tracker.seed(image)
         self._previous_cp = None
         self._last_facts = None
-        self._note_board_back()
+        if lost:
+            self._note_board_back()
+            return
+        if not same_pieces and self._user_to_move():
+            self._comment(Reason.MOVE_CONFIRMED, None)
 
     def _say(self, text: str) -> None:
         self.messages.append(text)
+
+
+def _fen_with_turn(fen: str, turn: chess.Color) -> str:
+    parts = fen.split(" ")
+    if len(parts) < 2:
+        return fen
+    parts[1] = "w" if turn == chess.WHITE else "b"
+    return " ".join(parts)
 
 
 class _UnavailableLlm:

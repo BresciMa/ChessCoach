@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -31,3 +31,6 @@ class CoachFacts:
     development_black: int
     own_king: KingFacts
     opponent_king: KingFacts
+    best_move_plain: str | None = None
+    last_move_plain: str | None = None
+    candidate_moves_plain: list[str] = field(default_factory=list)

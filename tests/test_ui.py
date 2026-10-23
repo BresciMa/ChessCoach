@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from chesscoach.coach.session import CoachSession
 from chesscoach.config import AppConfig
-from chesscoach.messages import TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
+from chesscoach.messages import MSG_BOARD_LOST, MSG_FOLLOWING, TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
 from chesscoach.types import Level
 from chesscoach.ui.board_overlay import BoardOverlay
 from chesscoach.ui.coach_window import CoachWindow
@@ -111,6 +111,19 @@ def test_level_popup_marks_the_current_choice_and_tooltips_stay_available(qapp):
     window.close()
 
 
+def test_stockfish_path_stays_for_the_next_open(qapp, tmp_path):
+    from chesscoach.config import load_config
+
+    path = tmp_path / "config.json"
+    config = AppConfig()
+    session = CoachSession(config, engine=_Silent(), llm=_Silent(), config_path=path)
+    dialog = SettingsDialog(config, on_save=session.save)
+    dialog.stockfish.setText(r"C:\Stockfish\stockfish.exe")
+    dialog._save()
+    reopened = SettingsDialog(load_config(path))
+    assert reopened.stockfish.text() == r"C:\Stockfish\stockfish.exe"
+
+
 def test_settings_lists_gemini_models_and_keeps_a_saved_custom_one(qapp):
     config = AppConfig(gemini_model="gemini-custom")
     dialog = SettingsDialog(config)
@@ -123,6 +136,27 @@ def test_settings_lists_gemini_models_and_keeps_a_saved_custom_one(qapp):
     dialog.model.setCurrentIndex(dialog.model.findData("gemini-pro-latest"))
     dialog._save()
     assert config.gemini_model == "gemini-pro-latest"
+
+
+def test_chat_marks_user_system_board_and_coach(qapp):
+    session = CoachSession(AppConfig(training_accepted=True), engine=_Silent(), llm=_Silent())
+    window = CoachWindow(session)
+    window.show()
+    qapp.processEvents()
+    window._append("e o cavalo?", "user")
+    window._show(MSG_FOLLOWING)
+    window._show(MSG_BOARD_LOST)
+    window._append("A posição pede\num lance calmo.", "coach")
+    text = window.chat.toPlainText()
+    assert "você" in text
+    assert "e o cavalo?" in text
+    assert "sistema" in text
+    assert MSG_FOLLOWING in text
+    assert "tabuleiro" in text
+    assert MSG_BOARD_LOST in text
+    assert "coach" in text
+    assert "A posição pede um lance calmo." in text
+    window.close()
 
 
 def test_overlay_window_lets_clicks_through(qapp):

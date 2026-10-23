@@ -56,6 +56,8 @@ def test_engine_moves_become_san_and_missing_engine_keeps_static_fields():
     assert facts.previous_evaluation_cp == 10
     assert facts.moved_piece == "peão branco"
     assert facts.moved_piece_rule.startswith("O peão anda")
+    assert facts.best_move_plain == "cavalo preto de g8 para h6 (Nh6)"
+    assert facts.last_move_plain == "peão branco de e2 para e4 (e4)"
 
     bare = analyzer.analyze(game, None, 10)
     assert bare.best_move_san is None

@@ -34,7 +34,7 @@ class AppConfig:
     def to_dict(self) -> dict:
         payload = {
             "training_accepted": self.training_accepted,
-            "level": self.level.value,
+            "level": _enum_value(self.level),
             "monitor": self.monitor,
             "roi": None
             if self.roi is None
@@ -44,8 +44,8 @@ class AppConfig:
                 "width": self.roi.width,
                 "height": self.roi.height,
             },
-            "orientation": self.orientation.value,
-            "theme": self.theme.value,
+            "orientation": _enum_value(self.orientation),
+            "theme": _enum_value(self.theme),
             "stockfish_path": self.stockfish_path,
             "gemini_model": self.gemini_model,
             "engine_movetime_ms": self.engine_movetime_ms,
@@ -105,6 +105,11 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
     if _SECRET_KEYS & payload.keys():
         raise RuntimeError("A configuração não pode guardar a chave da API.")
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _enum_value(value) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw)
 
 
 def _enum(kind, value, fallback):

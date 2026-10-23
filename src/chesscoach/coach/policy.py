@@ -56,6 +56,7 @@ class StockHelpPolicy:
         else:
             if level == Level.BEGINNER:
                 packet.candidate_moves_san = []
+                packet.candidate_moves_plain = []
             elif level != Level.LEVEL_1:
                 packet = _hide_moves(packet)
             speak = True
@@ -132,13 +133,20 @@ def _hide_cp(facts: CoachFacts) -> CoachFacts:
 
 
 def _hide_moves(facts: CoachFacts) -> CoachFacts:
-    return replace(facts, best_move_san=None, candidate_moves_san=[])
+    return replace(
+        facts,
+        best_move_san=None,
+        best_move_plain=None,
+        candidate_moves_san=[],
+        candidate_moves_plain=[],
+    )
 
 
 def _clone(facts: CoachFacts) -> CoachFacts:
     return replace(
         facts,
         candidate_moves_san=list(facts.candidate_moves_san),
+        candidate_moves_plain=list(facts.candidate_moves_plain),
         hanging_squares=list(facts.hanging_squares),
         threatened_squares=list(facts.threatened_squares),
         own_king=replace(facts.own_king),

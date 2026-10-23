@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import time
 
 import chess
@@ -22,7 +23,18 @@ from PySide6.QtWidgets import (
 from chesscoach.messages import (
     LEVEL_BLURBS,
     LEVEL_LABELS,
+    MSG_AMBIGUOUS,
+    MSG_BOARD_BACK,
+    MSG_BOARD_LOST,
+    MSG_FOLLOWING,
+    MSG_LLM_FAILED,
+    MSG_NEED_ROI,
+    MSG_NO_ENGINE,
+    MSG_NO_KEY,
     MSG_PROMOTION,
+    MSG_SSL,
+    MSG_UNREADABLE,
+    MSG_UNSTABLE,
     TRAINING_BADGE,
 )
 from chesscoach.types import Level
@@ -45,6 +57,24 @@ QPushButton#toolButton:disabled { color: #667; }
 QLabel#trainingBadge { color: #9ad7ff; }
 QLabel#levelLabel { color: #d5deee; }
 """
+
+_BOARD_LINES = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE, MSG_UNREADABLE}
+_SYSTEM_LINES = {
+    MSG_AMBIGUOUS,
+    MSG_FOLLOWING,
+    MSG_LLM_FAILED,
+    MSG_NEED_ROI,
+    MSG_NO_ENGINE,
+    MSG_NO_KEY,
+    MSG_PROMOTION,
+    MSG_SSL,
+}
+_CHAT_KIND = {
+    "user": ("#9ad7ff", "você"),
+    "system": ("#8b95a8", "sistema"),
+    "board": ("#e2b657", "tabuleiro"),
+    "coach": ("#d5deee", "coach"),
+}
 
 
 class TitleBar(QWidget):
@@ -123,6 +153,8 @@ class CoachWindow(QWidget):
         self.chat = QTextEdit()
         self.chat.setObjectName("chatLog")
         self.chat.setReadOnly(True)
+        self.chat.document().setDocumentMargin(4)
+        self.chat.document().setDefaultStyleSheet("p { margin-top: 1px; margin-bottom: 1px; }")
         column.addWidget(self.chat, 1)
         input_row = QHBoxLayout()
         self.input = QLineEdit()
@@ -238,8 +270,23 @@ class CoachWindow(QWidget):
         self._set_coach_enabled(True)
         self.training_label.setText(TRAINING_BADGE)
 
-    def _append(self, text: str) -> None:
-        self.chat.append(text)
+    def _append(self, text: str, kind: str = "coach") -> None:
+        color, label = _CHAT_KIND[kind]
+        body = html.escape(" ".join(text.split()))
+        self.chat.append(
+            f'<p style="margin:1px 0; line-height:1.2">'
+            f'<span style="color:{color}; font-size:11px">{label}</span> '
+            f'<span style="color:#e8eef7">{body}</span></p>'
+        )
+
+    def _show(self, text: str) -> None:
+        if text in _BOARD_LINES:
+            kind = "board"
+        elif text in _SYSTEM_LINES:
+            kind = "system"
+        else:
+            kind = "coach"
+        self._append(text, kind)
 
     def _send(self) -> None:
         if not self.session.config.training_accepted:
@@ -248,10 +295,10 @@ class CoachWindow(QWidget):
         if not text:
             return
         self.input.clear()
-        self._append(f"Você: {text}")
+        self._append(text, "user")
         reply = self.session.send_chat(text)
         if reply:
-            self._append(reply)
+            self._show(reply)
         self._sync_overlay()
 
     def _hint(self) -> None:
@@ -259,7 +306,7 @@ class CoachWindow(QWidget):
             return
         reply = self.session.request_hint()
         if reply:
-            self._append(reply)
+            self._show(reply)
         self._sync_overlay()
 
     def _pause(self) -> None:
@@ -308,7 +355,7 @@ class CoachWindow(QWidget):
         self.level_button.setToolTip(f"Nível de ajuda: {LEVEL_LABELS[self.session.config.level]}")
 
     def _settings(self) -> None:
-        dialog = SettingsDialog(self.session.config, self)
+        dialog = SettingsDialog(self.session.config, self, on_save=self.session.save)
         if dialog.exec():
             self.session.save()
 
@@ -341,7 +388,7 @@ class CoachWindow(QWidget):
             dialog.orientation.currentData(),
         )
         if error:
-            self._append(error)
+            self._show(error)
             return
         if not self.session.config.training_accepted:
             self.training_dialog.open()
@@ -352,7 +399,7 @@ class CoachWindow(QWidget):
             frame = self.session.capture.grab(self.session.config.monitor, self.session.config.roi)
             message = self.session.read_now(frame, dialog.side.currentData())
         if message:
-            self._append(message)
+            self._show(message)
 
     def _pick_rectangle(self, screen):
         self.timer.stop()
@@ -371,7 +418,7 @@ class CoachWindow(QWidget):
         start = len(self.session.messages)
         lines = self.session.poll(now)
         for line in lines:
-            self._append(line)
+            self._show(line)
         if MSG_PROMOTION in lines:
             self._ask_promotion(start)
         self._sync_overlay()
@@ -394,7 +441,7 @@ class CoachWindow(QWidget):
         self.session.confirm_promotion(chosen["piece"])
         for line in self.session.messages[start:]:
             if line != MSG_PROMOTION and line not in self.chat.toPlainText():
-                self._append(line)
+                self._show(line)
 
     def _sync_overlay(self) -> None:
         state = self.session.overlay_state()

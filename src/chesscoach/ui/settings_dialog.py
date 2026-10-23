@@ -20,10 +20,11 @@ from chesscoach.messages import KEY_HELP, TRAINING_TEXT
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config, parent=None):
+    def __init__(self, config, parent=None, on_save=None):
         super().__init__(parent)
         self.setWindowTitle("Configurações")
         self.config = config
+        self._on_save = on_save
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.monitor = QSpinBox()
@@ -58,13 +59,19 @@ class SettingsDialog(QDialog):
         layout.addWidget(save)
 
     def _browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Stockfish", "", "Executável (*.exe);;Todos (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Stockfish", self.stockfish.text(), "Executável (*.exe);;Todos (*)")
         if path:
             self.stockfish.setText(path)
+            self._commit()
 
     def _save(self) -> None:
+        self._commit()
+        self.accept()
+
+    def _commit(self) -> None:
         self.config.monitor = self.monitor.value()
         self.config.stockfish_path = self.stockfish.text().strip()
         chosen = self.model.currentData()
         self.config.gemini_model = chosen or DEFAULT_GEMINI_MODEL
-        self.accept()
+        if self._on_save is not None:
+            self._on_save()

@@ -1,6 +1,6 @@
 import chess
 
-from chesscoach.chess.game import ChessGame, match_legal_move
+from chesscoach.chess.game import ChessGame, match_legal_move, shortest_replays
 from chesscoach.config import AppConfig
 from chesscoach.types import Orientation, Rect, TrackerKind
 from chesscoach.vision.tracker import MOVING_INTERVAL_MS, STABLE_HOLD_MS, PositionTracker, WatchState
@@ -166,6 +166,41 @@ def test_illegal_change_and_ambiguous_board():
     assert game.sans == []
 
 
+def test_several_moves_ask_for_a_fresh_read_instead_of_sticking():
+    tracker, game = _tracker()
+    start = chess.Board()
+    start.push_san("e4")
+    game.apply(game.parse_san("e4"))
+    tracker.seed(board_image(start))
+    later = start.copy()
+    for san in ("c6", "Nc3", "d5"):
+        later.push_san(san)
+    picture = board_image(later)
+    tracker.ingest(frame(picture, 0))
+    tracker.ingest(frame(picture, 100))
+    result = tracker.ingest(frame(picture, 500))
+    assert result.kind == TrackerKind.BOARD_CHECK
+    assert game.sans == ["e4"]
+
+
+def test_shortest_replay_recovers_the_missed_moves():
+    start = chess.Board()
+    start.push_san("e4")
+    later = start.copy()
+    for san in ("c6", "Nc3", "d5"):
+        later.push_san(san)
+    placement = {chess.square_name(square): piece.symbol() for square, piece in later.piece_map().items()}
+    paths = shortest_replays(start, placement)
+    assert len(paths) == 1
+    replay = start.copy()
+    sans = []
+    for move in paths[0]:
+        sans.append(replay.san(move))
+        replay.push(move)
+    assert sans == ["c6", "Nc3", "d5"]
+    assert replay.fen() == later.fen()
+
+
 def test_match_helper_prefers_the_larger_explanation():
     board = chess.Board("k7/8/8/8/8/8/8/4K2R w K - 0 1")
     found = match_legal_move(board, {"e1", "f1", "g1", "h1"})
@@ -200,7 +235,7 @@ def test_a_drag_trail_is_not_a_move():
     tracker.ingest(frame(dragged, 0))
     tracker.ingest(frame(dragged, 100))
     result = tracker.ingest(frame(dragged, 500))
-    assert result.kind == TrackerKind.NO_CHANGE
+    assert result.kind == TrackerKind.BOARD_CHECK
     assert game.sans == []
 
 

@@ -42,6 +42,31 @@ def test_level_two_hides_the_move_until_a_hint():
     assert hinted.arrow == "Nh6"
 
 
+def test_level_two_hides_the_plain_move_until_a_hint():
+    policy = StockHelpPolicy()
+    facts = _facts(best_move_plain="cavalo preto de g8 para h6 (Nh6)")
+    quiet = policy.apply(facts, Level.LEVEL_2, Reason.MOVE_CONFIRMED)
+    assert quiet.facts_for_model.best_move_plain is None
+    hinted = policy.apply(facts, Level.LEVEL_2, Reason.HINT_REQUESTED)
+    assert hinted.facts_for_model.best_move_plain == "cavalo preto de g8 para h6 (Nh6)"
+
+
+def test_lower_levels_ask_for_the_move_in_one_line():
+    from chesscoach.coach.orchestrator import build_messages
+
+    decision = StockHelpPolicy().apply(
+        _facts(best_move_plain="cavalo branco de g1 para e2 (Ne2)"),
+        Level.LEVEL_1,
+        Reason.MOVE_CONFIRMED,
+    )
+    messages = build_messages(decision, Level.LEVEL_1, Reason.MOVE_CONFIRMED, None)
+    assert "uma única linha" in messages[0].content
+    assert "casa de saída" in messages[0].content
+    assert "Ne2" in messages[1].content
+    master = build_messages(decision, Level.MASTER, Reason.MOVE_CONFIRMED, None)
+    assert "Sem best_move_plain" in master[0].content
+
+
 def test_level_two_stays_quiet_without_an_alert():
     policy = StockHelpPolicy()
     decision = policy.apply(_facts(), Level.LEVEL_2, Reason.MOVE_CONFIRMED)

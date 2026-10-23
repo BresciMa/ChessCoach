@@ -13,18 +13,20 @@ from chesscoach.messages import LEVEL_LABELS, MSG_LLM_FAILED, MSG_NO_ENGINE, MSG
 from chesscoach.types import Level, Message, Reason
 
 _SYSTEM = (
-    "Você é o Chess Coach, um treinador de xadrez. Fale em português, com frases curtas, "
-    "claras para adolescente e adulto. Use somente os fatos recebidos. "
-    "Se best_move_san estiver ausente, não nomeie lance nem casa de destino de uma jogada sugerida. "
+    "Você é o Chess Coach, um treinador de xadrez. Fale em português, numa única linha, "
+    "sem quebra de linha, sem markdown e sem lista. Use somente os fatos recebidos. "
+    "Se best_move_plain estiver ausente, não nomeie lance nem casa de destino de uma jogada sugerida. "
+    "Quando best_move_plain existir, diga a peça, a casa de saída e a de chegada, e o motivo em poucas palavras. "
+    "O código do lance fica só entre parênteses, nunca como a resposta inteira. "
     "Não invente avaliação numérica."
 )
 
 _LEVEL_TONE = {
-    Level.BEGINNER: "A pessoa está aprendendo o movimento das peças. Explique a peça que andou e, se houver best_move_san, indique esse único lance.",
-    Level.LEVEL_1: "A pessoa sabe o básico. Sugira o próximo lance com base em best_move_san.",
-    Level.LEVEL_2: "Alerte xeque, peça solta, ameaça ou rei no centro. Sem best_move_san, não diga o que jogar.",
-    Level.LEVEL_3: "Fale de plano, desenvolvimento e segurança do rei. Sem best_move_san, não liste lances.",
-    Level.MASTER: "Comente só o lance que já aconteceu e se a posição melhorou ou piorou. Sem best_move_san, não sugira o próximo.",
+    Level.BEGINNER: "A pessoa está aprendendo o movimento das peças. Use last_move_plain para dizer qual peça andou e como ela anda. Se houver best_move_plain, indique só esse lance, com a peça e as casas.",
+    Level.LEVEL_1: "A pessoa sabe o básico. Sugira o próximo lance com best_move_plain: peça, saída, chegada e uma razão curta.",
+    Level.LEVEL_2: "Alerte xeque, peça solta, ameaça ou rei no centro, dizendo qual peça e qual casa. Sem best_move_plain, não diga o que jogar.",
+    Level.LEVEL_3: "Fale de plano, desenvolvimento e segurança do rei, citando peças e casas dos fatos. Sem best_move_plain, não liste lances.",
+    Level.MASTER: "Comente só o lance que já aconteceu, de preferência com last_move_plain, e se a posição melhorou ou piorou. Sem best_move_plain, não sugira o próximo.",
 }
 
 
@@ -66,7 +68,7 @@ class CoachOrchestrator:
             return Turn(decision, str(exc), False)
         except Exception:
             return Turn(decision, MSG_LLM_FAILED, False)
-        return Turn(decision, text, True)
+        return Turn(decision, _one_line(text), True)
 
 
 def build_messages(
@@ -98,11 +100,17 @@ def _engine_missing(facts: CoachFacts) -> bool:
 
 def _beginner_fallback(facts: CoachFacts) -> str:
     parts = [part for part in (facts.moved_piece, facts.moved_piece_rule) if part]
-    if facts.best_move_san:
+    if facts.best_move_plain:
+        parts.append(f"Uma ideia é {facts.best_move_plain}.")
+    elif facts.best_move_san:
         parts.append(f"Uma ideia é {facts.best_move_san}.")
     if parts:
         return " ".join(parts)
     return PIECE_RULES["P"]
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _default_ask(reason: Reason) -> str:
