@@ -1,0 +1,4 @@
+As peças SVG e os PNG desta pasta são o conjunto Cburnett usado pelo Lichess
+(https://github.com/lichess-org/lila, public/piece/cburnett).
+Autor: Colin M.L. Burnett. Licença: GPL-2.0-or-later.
+Os PNG são uma rasterização 64×64 desses SVG, usada só para reconhecer o tabuleiro.

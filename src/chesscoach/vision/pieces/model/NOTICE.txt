@@ -1,0 +1,5 @@
+squares.onnx é um classificador local de casas de xadrez, treinado neste projeto.
+As peças de treino são conjuntos 2D publicados pelo Lichess em public/piece
+(cburnett, merida, alpha, chessnut, companion, gioco, reillycraig, maestro).
+Cada conjunto mantém a licença do respectivo autor; cburnett é GPL-2.0-or-later,
+de Colin M.L. Burnett. A inferência roda na máquina, com ONNX Runtime.
