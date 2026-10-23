@@ -77,6 +77,8 @@ class CoachSession:
         self._threats: list[str] = []
         self._pending_promotion = False
         self._board_lost = False
+        self.blind = False
+        self._last_look: int | None = None
         self.calibrator = RoiCalibrator()
 
     def save(self) -> None:
@@ -141,6 +143,8 @@ class CoachSession:
         self._last_facts = None
         self._arrow = None
         self._threats = []
+        self.blind = False
+        self._board_lost = False
         self._say(MSG_FOLLOWING)
         return None
 
@@ -159,6 +163,8 @@ class CoachSession:
         self.tracker.seed(frame.image)
         self._previous_cp = None
         self._last_facts = None
+        self.blind = False
+        self._board_lost = False
         return None
 
     def confirm_promotion(self, piece: str) -> None:
@@ -181,17 +187,22 @@ class CoachSession:
         if result is None:
             return self.messages[start:]
         if result.restored:
+            self.blind = False
             self._note_board_back()
         if result.kind == TrackerKind.NO_CHANGE:
+            if self.blind:
+                self._look_again(now_ms)
             return self.messages[start:]
         if result.kind == TrackerKind.BOARD_UNSTABLE:
+            self.blind = True
             self._say(MSG_UNSTABLE)
         elif result.kind == TrackerKind.BOARD_LOST:
+            self.blind = True
             if not self._board_lost:
                 self._board_lost = True
                 self._say(MSG_BOARD_LOST)
         elif result.kind == TrackerKind.BOARD_CHECK:
-            self._reconnect()
+            self._reconnect(now_ms)
         elif result.kind == TrackerKind.AMBIGUOUS:
             self._awaiting_move_text = True
             self._say(MSG_AMBIGUOUS)
@@ -266,7 +277,21 @@ class CoachSession:
         self._board_lost = False
         self._say(MSG_BOARD_BACK)
 
-    def _reconnect(self) -> None:
+    def _look_again(self, now_ms: int) -> None:
+        """Enquanto cego, a imagem parada ainda pode ser o tabuleiro que já conhecíamos."""
+        if self.tracker.matches_committed():
+            self.blind = False
+            self._board_lost = False
+            return
+        if not self.tracker.is_settled() or self.tracker.current_is_flat():
+            return
+        if self._last_look is not None and now_ms - self._last_look < _LOOK_AGAIN_MS:
+            return
+        self._reconnect(now_ms)
+
+    def _reconnect(self, now_ms: int | None = None) -> None:
+        if now_ms is not None:
+            self._last_look = now_ms
         image = self.tracker.last_image
         if image is None:
             return
@@ -283,6 +308,11 @@ class CoachSession:
         if not found.ok or not found.fen:
             if self.game.fen != before:
                 self.game.load_fen(before, known)
+            if _mean_confidence(found) < _LOST_MEAN_CONFIDENCE:
+                self.blind = True
+                if not self._board_lost:
+                    self._board_lost = True
+                    self._say(MSG_BOARD_LOST)
             return
         placement = {item.square: item.piece for item in found.squares if item.piece}
         paths = shortest_replays(self.game.board, placement)
@@ -301,6 +331,7 @@ class CoachSession:
         self.tracker.seed(image)
         self._previous_cp = None
         self._last_facts = None
+        self.blind = False
         if lost:
             self._note_board_back()
             return
@@ -309,6 +340,16 @@ class CoachSession:
 
     def _say(self, text: str) -> None:
         self.messages.append(text)
+
+
+_LOST_MEAN_CONFIDENCE = 0.35
+_LOOK_AGAIN_MS = 1000
+
+
+def _mean_confidence(found) -> float:
+    if not found.squares:
+        return 0.0
+    return sum(item.confidence for item in found.squares) / len(found.squares)
 
 
 def _fen_with_turn(fen: str, turn: chess.Color) -> str:

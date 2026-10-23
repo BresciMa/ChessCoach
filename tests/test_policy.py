@@ -65,6 +65,8 @@ def test_lower_levels_ask_for_the_move_in_one_line():
     assert "Ne2" in messages[1].content
     master = build_messages(decision, Level.MASTER, Reason.MOVE_CONFIRMED, None)
     assert "Sem best_move_plain" in master[0].content
+    assert "previous_move_plain" in master[0].content
+    assert "opening_name" in master[0].content
 
 
 def test_level_two_stays_quiet_without_an_alert():
@@ -81,6 +83,14 @@ def test_master_comment_has_no_next_move():
     assert decision.facts_for_model.best_move_san is None
     assert decision.arrow is None
     assert decision.facts_for_model.last_move_san == "e4"
+    named = policy.apply(
+        _facts(opening_name="Abertura Escocesa", previous_move_plain="peão branco de e2 para e4 (e4)"),
+        Level.MASTER,
+        Reason.MOVE_CONFIRMED,
+    )
+    assert named.facts_for_model.opening_name == "Abertura Escocesa"
+    assert named.facts_for_model.previous_move_plain.startswith("peão branco")
+    assert named.facts_for_model.best_move_san is None
     hinted = policy.apply(_facts(), Level.MASTER, Reason.HINT_REQUESTED)
     assert hinted.facts_for_model.best_move_san == "Nh6"
     assert hinted.facts_for_model.candidate_moves_san == []

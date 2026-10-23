@@ -59,6 +59,8 @@ QLabel#levelLabel { color: #d5deee; }
 """
 
 _BOARD_LINES = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE, MSG_UNREADABLE}
+_SILENT_BOARD = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE}
+_BLIND_TIP = "O coach ficou cego"
 _SYSTEM_LINES = {
     MSG_AMBIGUOUS,
     MSG_FOLLOWING,
@@ -126,7 +128,9 @@ class CoachWindow(QWidget):
         title_row = QHBoxLayout(self.title)
         title_row.setContentsMargins(0, 0, 0, 0)
         self.avatar = QLabel()
-        self.avatar.setPixmap(_avatar(28))
+        self._avatar_awake = _avatar(28, blind=False)
+        self._avatar_blind = _avatar(28, blind=True)
+        self.avatar.setPixmap(self._avatar_awake)
         self.avatar.setFixedSize(28, 28)
         self.name_label = QLabel("Chess Coach")
         self.level_label = QLabel(LEVEL_LABELS[session.config.level])
@@ -279,7 +283,14 @@ class CoachWindow(QWidget):
             f'<span style="color:#e8eef7">{body}</span></p>'
         )
 
+    def _set_blind(self, blind: bool) -> None:
+        self.avatar.setPixmap(self._avatar_blind if blind else self._avatar_awake)
+        self.avatar.setToolTip(_BLIND_TIP if blind else "")
+
     def _show(self, text: str) -> None:
+        if text in _SILENT_BOARD:
+            self._set_blind(text != MSG_BOARD_BACK)
+            return
         if text in _BOARD_LINES:
             kind = "board"
         elif text in _SYSTEM_LINES:
@@ -398,6 +409,7 @@ class CoachWindow(QWidget):
         else:
             frame = self.session.capture.grab(self.session.config.monitor, self.session.config.roi)
             message = self.session.read_now(frame, dialog.side.currentData())
+        self._set_blind(self.session.blind)
         if message:
             self._show(message)
 
@@ -417,6 +429,7 @@ class CoachWindow(QWidget):
         now = int(time.monotonic() * 1000)
         start = len(self.session.messages)
         lines = self.session.poll(now)
+        self._set_blind(self.session.blind)
         for line in lines:
             self._show(line)
         if MSG_PROMOTION in lines:
@@ -471,16 +484,17 @@ def _arrow_squares(session, san: str | None) -> tuple[str, str] | None:
     return chess.square_name(move.from_square), chess.square_name(move.to_square)
 
 
-def _avatar(size: int) -> QPixmap:
+def _avatar(size: int, blind: bool = False) -> QPixmap:
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setBrush(QColor("#3dbeff"))
+    painter.setBrush(QColor("#8b95a8") if blind else QColor("#3dbeff"))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(0, 0, size - 1, size - 1)
-    painter.setBrush(QColor("#102033"))
-    painter.drawEllipse(size // 5, size // 4, size // 6, size // 6)
-    painter.drawEllipse(size * 3 // 5, size // 4, size // 6, size // 6)
+    if not blind:
+        painter.setBrush(QColor("#102033"))
+        painter.drawEllipse(size // 5, size // 4, size // 6, size // 6)
+        painter.drawEllipse(size * 3 // 5, size // 4, size // 6, size // 6)
     painter.end()
     return pixmap

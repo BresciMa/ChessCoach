@@ -33,4 +33,6 @@ class CoachFacts:
     opponent_king: KingFacts
     best_move_plain: str | None = None
     last_move_plain: str | None = None
+    previous_move_plain: str | None = None
+    opening_name: str | None = None
     candidate_moves_plain: list[str] = field(default_factory=list)

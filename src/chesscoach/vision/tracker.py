@@ -7,9 +7,9 @@ from enum import Enum
 import chess
 import numpy as np
 
-from chesscoach.chess.game import ChessGame, affected_squares, match_legal_move
+from chesscoach.chess.game import ChessGame
 from chesscoach.config import AppConfig
-from chesscoach.messages import MSG_AMBIGUOUS, MSG_UNSTABLE
+from chesscoach.messages import MSG_UNSTABLE
 from chesscoach.types import Frame, TrackerKind, TrackerResult
 from chesscoach.vision.squares import (
     SQUARE_DIFF_THRESHOLD,
@@ -23,8 +23,6 @@ IDLE_INTERVAL_MS = 250
 MOVING_INTERVAL_MS = 100
 STABILITY_TIMEOUT_MS = 1000
 STABLE_HOLD_MS = 400
-MAX_EXTRA_SQUARES = 2
-LOST_SQUARE_COUNT = 10
 
 
 class WatchState(str, Enum):
@@ -147,6 +145,7 @@ class PositionTracker:
         self._lost = False
         self._occlusion: np.ndarray | None = None
         self.last_image: np.ndarray | None = None
+        self._seen: np.ndarray | None = None
 
     @property
     def interval_ms(self) -> int:
@@ -162,6 +161,18 @@ class PositionTracker:
         self._last_poll = None
         self._lost = False
         self._occlusion = None
+        self._seen = None
+
+    def matches_committed(self) -> bool:
+        if self._committed is None or self._seen is None:
+            return False
+        return signatures_similar(self._committed, self._seen, self.threshold)
+
+    def current_is_flat(self) -> bool:
+        return _flat_image(self.last_image)
+
+    def is_settled(self) -> bool:
+        return self.watch.state == WatchState.IDLE
 
     def adopt_visual(self) -> None:
         if self._last_stable is not None:
@@ -177,6 +188,7 @@ class PositionTracker:
         self._lost = False
         self._occlusion = None
         self.last_image = image
+        self._seen = signature
 
     def poll(self, now_ms: int) -> TrackerResult | None:
         roi = self.config.roi
@@ -191,6 +203,7 @@ class PositionTracker:
     def ingest(self, frame: Frame) -> TrackerResult:
         signature = square_signature(frame.image)
         self.last_image = frame.image
+        self._seen = signature
         event = self.watch.update(signature, frame.time_ms)
         if event == _WatchEvent.BASELINE:
             self._committed = signature
@@ -245,33 +258,15 @@ class PositionTracker:
             self._committed = signature
             return TrackerResult(TrackerKind.NO_CHANGE)
         changed = self._changed(signature)
-        if len(changed) >= LOST_SQUARE_COUNT:
-            return TrackerResult(TrackerKind.BOARD_LOST)
-        found = match_legal_move(self.game.board, changed)
-        if found.kind == TrackerKind.NO_CHANGE:
-            if len(changed) > MAX_EXTRA_SQUARES:
-                return TrackerResult(TrackerKind.BOARD_CHECK)
+        if not changed:
             return TrackerResult(TrackerKind.NO_CHANGE)
-        if self._extra_squares(changed, found) > MAX_EXTRA_SQUARES:
-            return TrackerResult(TrackerKind.BOARD_CHECK)
-        if found.kind == TrackerKind.AMBIGUOUS:
-            return TrackerResult(TrackerKind.AMBIGUOUS, message=MSG_AMBIGUOUS)
-        if found.kind == TrackerKind.PROMOTION_NEEDED:
-            self._pending = (found.origin or "", found.destination or "")
-            return TrackerResult(
-                TrackerKind.PROMOTION_NEEDED,
-                promotion_from=found.origin,
-                promotion_to=found.destination,
-            )
-        assert found.move is not None
-        san = self.game.apply(found.move)
-        self._committed = signature
-        return TrackerResult(TrackerKind.MOVE_CONFIRMED, san=san)
+        if _flat_image(self.last_image):
+            return TrackerResult(TrackerKind.BOARD_LOST)
+        return TrackerResult(TrackerKind.BOARD_CHECK)
 
-    def _extra_squares(self, changed: set[str], found) -> int:
-        move = found.move
-        if move is None and found.origin and found.destination:
-            move = chess.Move.from_uci(found.origin + found.destination)
-        if move is None:
-            return len(changed)
-        return len(changed - affected_squares(self.game.board, move))
+def _flat_image(image: np.ndarray | None) -> bool:
+    """Uma janela lisa não tem casas claras e escuras. Destaque e cursor continuam tendo."""
+    if image is None:
+        return False
+    luma = square_signature(image).mean(axis=1)
+    return float(luma.max() - luma.min()) < 18.0

@@ -152,8 +152,8 @@ def test_chat_marks_user_system_board_and_coach(qapp):
     assert "e o cavalo?" in text
     assert "sistema" in text
     assert MSG_FOLLOWING in text
-    assert "tabuleiro" in text
-    assert MSG_BOARD_LOST in text
+    assert MSG_BOARD_LOST not in text
+    assert window.avatar.toolTip() == "O coach ficou cego"
     assert "coach" in text
     assert "A posição pede um lance calmo." in text
     window.close()

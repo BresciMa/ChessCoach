@@ -63,8 +63,8 @@ def test_motion_waits_until_the_piece_has_settled():
     result = tracker.poll(quiet + STABLE_HOLD_MS)
     assert tracker.watch.state == WatchState.IDLE
     assert result is not None
-    assert result.kind == TrackerKind.MOVE_CONFIRMED
-    assert result.san == "e4"
+    assert result.kind == TrackerKind.BOARD_CHECK
+    assert game.sans == []
 
 
 def test_unstable_board_times_out_without_changing_the_game():
@@ -88,62 +88,22 @@ def test_highlight_only_does_not_become_a_move():
     tracker.ingest(frame(highlighted, 0))
     tracker.ingest(frame(highlighted, 100))
     result = tracker.ingest(frame(highlighted, 500))
-    assert result.kind == TrackerKind.NO_CHANGE
+    assert result.kind == TrackerKind.BOARD_CHECK
     assert game.sans == ["e4"]
 
 
-def test_simple_move_capture_castle_en_passant_and_promotion():
+def test_a_settled_picture_asks_for_a_read_instead_of_guessing_the_move():
     tracker, game = _tracker()
-    start = board_image(chess.Board())
-    tracker.seed(start)
+    tracker.seed(board_image(chess.Board()))
     after = chess.Board()
     after.push_san("e4")
-    _play(tracker, board_image(after))
-    assert game.sans == ["e4"]
+    assert _play(tracker, board_image(after)) == TrackerKind.BOARD_CHECK
+    assert game.sans == []
 
-    capture_before = chess.Board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1")
-    capture_game = ChessGame(capture_before)
-    capture_tracker, _ = _tracker(capture_game)
-    capture_tracker.seed(board_image(capture_before))
-    capture_after = capture_before.copy()
-    capture_after.push_san("exd5")
-    _play(capture_tracker, board_image(capture_after))
-    assert capture_game.sans == ["exd5"]
-
-    castle_before = chess.Board("k7/8/8/8/8/8/8/4K2R w K - 0 1")
-    castle_game = ChessGame(castle_before)
-    castle_tracker, _ = _tracker(castle_game)
-    castle_tracker.seed(board_image(castle_before))
-    castle_after = castle_before.copy()
-    castle_after.push_san("O-O")
-    _play(castle_tracker, board_image(castle_after))
-    assert castle_game.sans == ["O-O"]
-
-    ep_before = chess.Board("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1")
-    ep_game = ChessGame(ep_before)
-    ep_tracker, _ = _tracker(ep_game)
-    ep_tracker.seed(board_image(ep_before))
-    ep_after = ep_before.copy()
-    ep_after.push_san("exd6")
-    _play(ep_tracker, board_image(ep_after))
-    assert ep_game.sans == ["exd6"]
-
-    promo_before = chess.Board("8/4P3/8/8/8/8/4K3/k7 w - - 0 1")
-    promo_game = ChessGame(promo_before)
-    promo_tracker, _ = _tracker(promo_game)
-    promo_tracker.seed(board_image(promo_before))
-    visual = promo_before.copy()
-    visual.push_san("e8=Q")
-    first = promo_tracker.ingest(frame(board_image(visual), 0))
-    holding = promo_tracker.ingest(frame(board_image(visual), 100))
-    result = promo_tracker.ingest(frame(board_image(visual), 500))
-    assert first.kind == TrackerKind.NO_CHANGE
-    assert holding.kind == TrackerKind.NO_CHANGE
-    assert result.kind == TrackerKind.PROMOTION_NEEDED
-    assert promo_game.sans == []
-    san = promo_tracker.confirm_promotion("q")
-    assert san == "e8=Q"
-    assert promo_game.board.piece_at(chess.E8).symbol() == "Q"
+    painted = tint(board_image(chess.Board()), [f"{file}4" for file in "abcdefgh"] + ["a5", "b5", "c5", "d5"])
+    marks, _ = _tracker()
+    marks.seed(board_image(chess.Board()))
+    assert _play(marks, painted) == TrackerKind.BOARD_CHECK
 
 
 def test_illegal_change_and_ambiguous_board():
@@ -155,7 +115,7 @@ def test_illegal_change_and_ambiguous_board():
     tracker.ingest(frame(noisy, 0))
     tracker.ingest(frame(noisy, 100))
     result = tracker.ingest(frame(noisy, 500))
-    assert result.kind == TrackerKind.NO_CHANGE
+    assert result.kind == TrackerKind.BOARD_CHECK
     assert game.sans == []
 
     everything = solid((0, 255, 0))
@@ -222,8 +182,8 @@ def test_a_pause_shorter_than_the_hold_does_not_change_the_game():
     assert game.sans == []
     tracker.ingest(frame(image, 300))
     settled = tracker.ingest(frame(image, 700))
-    assert settled.kind == TrackerKind.MOVE_CONFIRMED
-    assert game.sans == ["e4"]
+    assert settled.kind == TrackerKind.BOARD_CHECK
+    assert game.sans == []
 
 
 def test_a_drag_trail_is_not_a_move():
@@ -244,8 +204,8 @@ def test_two_leftover_squares_still_count_as_the_move():
     tracker.seed(board_image(chess.Board()))
     after = chess.Board()
     after.push_san("e4")
-    _play(tracker, tint(board_image(after), ["a3", "h3"]))
-    assert game.sans == ["e4"]
+    assert _play(tracker, tint(board_image(after), ["a3", "h3"])) == TrackerKind.BOARD_CHECK
+    assert game.sans == []
 
 
 def test_covering_the_board_stops_moves_until_the_same_position_returns():
@@ -284,7 +244,7 @@ def test_a_different_picture_while_lost_asks_for_a_fresh_read():
     assert game.sans == []
 
 
-def _play(tracker: PositionTracker, image) -> None:
+def _play(tracker: PositionTracker, image):
     tracker.ingest(frame(image, 0))
     tracker.ingest(frame(image, 100))
-    tracker.ingest(frame(image, 500))
+    return tracker.ingest(frame(image, 500)).kind

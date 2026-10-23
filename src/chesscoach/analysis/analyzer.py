@@ -6,6 +6,7 @@ import chess
 
 from chesscoach.analysis.facts import CoachFacts, KingFacts
 from chesscoach.chess.game import ChessGame
+from chesscoach.chess.openings import opening_name
 from chesscoach.engine.uci import EngineResult
 from chesscoach.messages import PIECE_NAMES, PIECE_RULES
 
@@ -40,6 +41,8 @@ class PositionAnalyzer:
             best_move_san=best,
             best_move_plain=best_plain,
             last_move_plain=last_plain,
+            previous_move_plain=_previous_move_plain(board),
+            opening_name=opening_name(game.sans) if game.history_known else None,
             candidate_moves_plain=candidate_plains,
             candidate_moves_san=candidates,
             hanging_squares=hanging,
@@ -124,6 +127,16 @@ def describe_move(board: chess.Board, move: chess.Move) -> str:
     if board.is_capture(move):
         return f"{name} de {origin} captura em {destination} ({san})"
     return f"{name} de {origin} para {destination} ({san})"
+
+
+def _previous_move_plain(board: chess.Board) -> str | None:
+    if len(board.move_stack) < 2:
+        return None
+    move = board.move_stack[-2]
+    probe = board.copy()
+    probe.pop()
+    probe.pop()
+    return describe_move(probe, move)
 
 
 def _last_move(board: chess.Board, sans: list[str]) -> tuple[str | None, str | None, str | None, str | None]:

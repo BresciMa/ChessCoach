@@ -26,7 +26,7 @@ _LEVEL_TONE = {
     Level.LEVEL_1: "A pessoa sabe o básico. Sugira o próximo lance com best_move_plain: peça, saída, chegada e uma razão curta.",
     Level.LEVEL_2: "Alerte xeque, peça solta, ameaça ou rei no centro, dizendo qual peça e qual casa. Sem best_move_plain, não diga o que jogar.",
     Level.LEVEL_3: "Fale de plano, desenvolvimento e segurança do rei, citando peças e casas dos fatos. Sem best_move_plain, não liste lances.",
-    Level.MASTER: "Comente só o lance que já aconteceu, de preferência com last_move_plain, e se a posição melhorou ou piorou. Sem best_move_plain, não sugira o próximo.",
+    Level.MASTER: "É a vez de quem usa o app, depois da resposta do adversário. Em uma linha, comente primeiro previous_move_plain, a jogada de quem usa o app, e depois last_move_plain como a defesa. Se opening_name existir, diga esse nome. Se não existir, não invente nome de abertura. Sem best_move_plain, não sugira o próximo.",
 }
 
 
