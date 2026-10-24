@@ -547,6 +547,9 @@ class CoachWindow(QWidget):
         start = len(self.session.messages)
         lines = self.session.poll(now)
         self._set_blind(self.session.blind)
+        if self.session.consume_chat_reset():
+            self.chat.clear()
+            lines = list(self.session.messages)
         for line in lines:
             self._show(line)
         if MSG_PROMOTION in lines:

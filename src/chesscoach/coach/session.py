@@ -27,6 +27,8 @@ from chesscoach.messages import (
     MSG_ENGINE_SILENT,
     MSG_FOLLOWING,
     MSG_NEED_ROI,
+    MSG_NEW_GAME_BLACK,
+    MSG_NEW_GAME_WHITE,
     MSG_NO_ENGINE,
     MSG_PROMOTION,
     MSG_UNREADABLE,
@@ -56,6 +58,7 @@ class PreparedComment:
     text: str | None
     decision: PolicyDecision
     evaluation_cp: int | None
+    epoch: int = 0
 
 
 class CoachSession:
@@ -104,6 +107,9 @@ class CoachSession:
         self.defer_comments = False
         self._next_comment: tuple[Reason, str | None, str] | None = None
         self._comment_busy = False
+        self._game_epoch = 0
+        self._taken_epoch = 0
+        self._chat_reset = False
         self._state_lock = threading.RLock()
         self._last_look: int | None = None
         self._forced_side: str | None = None
@@ -220,6 +226,7 @@ class CoachSession:
 
     def _poll_unlocked(self, now_ms: int) -> list[str]:
         start = len(self.messages)
+        chat_was_reset = self._chat_reset
         if not self.config.training_accepted or self.paused or self.config.roi is None:
             return []
         if self._pending_promotion:
@@ -238,6 +245,8 @@ class CoachSession:
         if result.kind == TrackerKind.NO_CHANGE:
             if self.blind:
                 self._look_again(now_ms)
+            if self._chat_reset and not chat_was_reset:
+                return list(self.messages)
             return self.messages[start:]
         if result.kind == TrackerKind.BOARD_UNSTABLE:
             self._mark_blind(True)
@@ -261,6 +270,8 @@ class CoachSession:
             if self._user_to_move():
                 _LOG.info("movimento detectado")
                 self._request_comment(Reason.MOVE_CONFIRMED, None)
+        if self._chat_reset and not chat_was_reset:
+            return list(self.messages)
         return self.messages[start:]
 
     def request_hint(self) -> str | None:
@@ -306,11 +317,18 @@ class CoachSession:
         self._next_comment = None
         if item is None:
             return None
+        self._taken_epoch = self._game_epoch
         self._comment_busy = True
         return item
 
     def release_comment(self) -> None:
         self._comment_busy = False
+
+    def consume_chat_reset(self) -> bool:
+        if not self._chat_reset:
+            return False
+        self._chat_reset = False
+        return True
 
     def waiting_fen(self) -> str | None:
         if self._next_comment is None:
@@ -335,6 +353,7 @@ class CoachSession:
             snap.sans = list(self.game.sans)
             fen = snap.fen
             previous_cp = self._previous_cp
+            epoch = self._taken_epoch if self._comment_busy else self._game_epoch
         engine_started = time.perf_counter()
         result = self.engine.analyze(fen)
         engine_ms = int((time.perf_counter() - engine_started) * 1000)
@@ -357,10 +376,10 @@ class CoachSession:
             fen,
         )
         evaluation = result.evaluation_cp if result is not None else None
-        return PreparedComment(fen, turn.text, turn.decision, evaluation)
+        return PreparedComment(fen, turn.text, turn.decision, evaluation, epoch)
 
     def commit_comment(self, prepared: PreparedComment) -> bool:
-        if prepared.fen != self.game.fen:
+        if prepared.epoch != self._game_epoch or prepared.fen != self.game.fen:
             _LOG.info("comentario descartado")
             if self._arrow_fen == prepared.fen:
                 self._clear_arrow()
@@ -477,6 +496,14 @@ class CoachSession:
                     self._board_lost = True
                     self._say(MSG_BOARD_LOST)
             return
+        placement = {item.square: item.piece for item in found.squares if item.piece}
+        kind = _start_kind(placement)
+        if kind == "flip" or (kind == "same" and not self._is_fresh_start()):
+            self._begin_new_game(flip=kind == "flip")
+            self.tracker.seed(image)
+            self._mark_blind(False)
+            self._board_lost = False
+            return
         if self._forced_side:
             self._forced_side = None
             self.game.load_fen(found.fen, history_known=False)
@@ -488,7 +515,6 @@ class CoachSession:
             self._board_lost = False
             self._sync_victory()
             return
-        placement = {item.square: item.piece for item in found.squares if item.piece}
         paths = shortest_replays(self.game.board, placement)
         same_pieces = paths == [[]]
         piece_diff = _piece_diff_count(self.game.board, placement)
@@ -528,6 +554,39 @@ class CoachSession:
         if not same_pieces and self._user_to_move():
             self._request_comment(Reason.MOVE_CONFIRMED, None)
 
+    def _is_fresh_start(self) -> bool:
+        return (
+            self.game.history_known
+            and not self.game.sans
+            and self.game.board.fen() == chess.STARTING_FEN
+        )
+
+    def _begin_new_game(self, flip: bool) -> None:
+        self._game_epoch += 1
+        if flip:
+            self.config.orientation = (
+                Orientation.WHITE_AT_BOTTOM
+                if self.config.orientation == Orientation.BLACK_AT_BOTTOM
+                else Orientation.BLACK_AT_BOTTOM
+            )
+            self.save()
+        self.game.reset()
+        self.messages.clear()
+        self._clear_arrow()
+        self._forced_side = None
+        self._previous_cp = None
+        self._last_facts = None
+        self._last_decision = None
+        self.last_eval_band = None
+        self._next_comment = None
+        self._pending_promotion = False
+        self._awaiting_move_text = False
+        self._sync_victory()
+        self._chat_reset = True
+        white = self.config.orientation == Orientation.WHITE_AT_BOTTOM
+        self._say(MSG_NEW_GAME_WHITE if white else MSG_NEW_GAME_BLACK)
+        _LOG.info("novo jogo orientacao=%s", self.config.orientation.value)
+
     def _sync_victory(self) -> None:
         won = self.game.board.is_checkmate() and not self._user_to_move()
         if won:
@@ -565,6 +624,29 @@ class CoachSession:
 
 _LOST_MEAN_CONFIDENCE = 0.35
 _LOOK_AGAIN_MS = 1000
+
+
+def _piece_placement(board: chess.Board) -> dict[str, str]:
+    return {chess.square_name(square): piece.symbol() for square, piece in board.piece_map().items()}
+
+
+def _rotated_start_placement() -> dict[str, str]:
+    board = chess.Board()
+    board.apply_transform(chess.flip_vertical)
+    board.apply_transform(chess.flip_horizontal)
+    return _piece_placement(board)
+
+
+_START_PLACEMENT = _piece_placement(chess.Board())
+_ROTATED_START_PLACEMENT = _rotated_start_placement()
+
+
+def _start_kind(placement: dict[str, str]) -> str | None:
+    if placement == _START_PLACEMENT:
+        return "same"
+    if placement == _ROTATED_START_PLACEMENT:
+        return "flip"
+    return None
 
 
 def _piece_diff_count(board: chess.Board, placement: dict[str, str]) -> int:

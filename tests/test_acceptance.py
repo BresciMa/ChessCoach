@@ -13,6 +13,8 @@ from chesscoach.messages import (
     MSG_BOARD_LOST,
     MSG_ENGINE_SILENT,
     MSG_NEED_ROI,
+    MSG_NEW_GAME_BLACK,
+    MSG_NEW_GAME_WHITE,
     MSG_NO_ENGINE,
     MSG_UNREADABLE,
     MSG_WE_WON,
@@ -602,6 +604,105 @@ def test_the_coach_line_records_the_model_time(caplog):
     assert llm.prompts
     assert any("llm_ms=" in record.message and "motor_ms=" in record.message for record in caplog.records)
     assert any(record.message.startswith("gemini ") for record in caplog.records)
+
+
+def _mate_board() -> chess.Board:
+    board = chess.Board()
+    for san in ("e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7"):
+        board.push_san(san)
+    return board
+
+
+def _watch(session, moments=(0, 250, 350, 750)) -> list[str]:
+    lines: list[str] = []
+    for moment in moments:
+        lines = session.poll(moment)
+    return lines
+
+
+def test_the_starting_position_starts_a_new_game_and_drops_the_old_phrase():
+    mate = _mate_board()
+    start = board_image(chess.Board())
+    session, engine, _llm = _session([board_image(mate), start, start, start, start])
+    session.game.load_fen(mate.fen(), history_known=False)
+    session.celebrating = True
+    session.messages = [MSG_WE_WON, "frase velha"]
+    session.defer_comments = True
+    session._request_comment(Reason.MOVE_CONFIRMED, None)
+    prepared = session.prepare_comment(Reason.MOVE_CONFIRMED, None)
+    calls = engine.calls
+    lines = _watch(session)
+    assert lines == [MSG_NEW_GAME_WHITE]
+    assert session.messages == [MSG_NEW_GAME_WHITE]
+    assert session.celebrating is False
+    assert session.game.fen == chess.STARTING_FEN
+    assert session.game.board.turn == chess.WHITE
+    assert session.game.history_known is True
+    assert session._next_comment is None
+    assert session.overlay_state().arrow is None
+    assert engine.calls == calls
+    assert session.commit_comment(prepared) is False
+    assert session.messages == [MSG_NEW_GAME_WHITE]
+    assert _watch(session, (1000, 1250, 1500)) == []
+    assert session.messages == [MSG_NEW_GAME_WHITE]
+
+
+def test_an_upside_down_start_switches_the_players_color():
+    mate = _mate_board()
+    turned = board_image(chess.Board(), Orientation.BLACK_AT_BOTTOM)
+    session, engine, _llm = _session([board_image(mate), turned, turned, turned])
+    session.config.orientation = Orientation.WHITE_AT_BOTTOM
+    session.game.load_fen(mate.fen(), history_known=False)
+    session.messages = [MSG_WE_WON]
+    calls = engine.calls
+    assert _watch(session) == [MSG_NEW_GAME_BLACK]
+    assert session.config.orientation == Orientation.BLACK_AT_BOTTOM
+    assert session.game.fen == chess.STARTING_FEN
+    assert engine.calls == calls
+
+
+def test_a_large_jump_that_is_not_the_start_keeps_the_chat():
+    mate = _mate_board()
+    mid = chess.Board()
+    for san in ("e4", "e5", "Nf3", "Nc6"):
+        mid.push_san(san)
+    session, engine, _llm = _session([board_image(mate), board_image(mid), board_image(mid), board_image(mid)])
+    session.game.load_fen(mate.fen(), history_known=False)
+    session.messages = [MSG_WE_WON, "conversa"]
+    session.celebrating = True
+    _watch(session)
+    assert session.messages == [MSG_WE_WON, "conversa"]
+    assert session.game.board.board_fen() == mid.board_fen()
+    assert session.game.history_known is False
+    assert session.celebrating is False
+    assert engine.calls == 0
+
+
+def test_blindness_and_a_failed_read_do_not_start_a_new_game():
+    mate = _mate_board()
+    picture = board_image(mate)
+    covered, _engine, _llm = _session([picture, solid((0, 255, 0)), solid((0, 255, 0)), solid((0, 255, 0))])
+    covered.game.load_fen(mate.fen(), history_known=False)
+    covered.celebrating = True
+    covered.messages = [MSG_WE_WON]
+    assert _watch(covered) == [MSG_BOARD_LOST]
+    assert covered.blind is True
+    assert covered.celebrating is True
+    assert MSG_WE_WON in covered.messages
+    assert MSG_NEW_GAME_WHITE not in covered.messages
+    assert covered.game.board.board_fen() == mate.board_fen()
+
+    failed, _engine, _llm = _session([picture, picture, picture, picture], classifier=_FailOnce())
+    failed.game.load_fen(mate.fen(), history_known=False)
+    failed.celebrating = True
+    failed.messages = [MSG_WE_WON]
+    failed.tracker.seed(board_image(chess.Board()))
+    failed._reconnect(0)
+    assert failed.blind is True
+    assert MSG_WE_WON in failed.messages
+    assert MSG_NEW_GAME_WHITE not in failed.messages
+    assert MSG_NEW_GAME_BLACK not in failed.messages
+    assert failed.game.board.board_fen() == mate.board_fen()
 
 
 def test_training_text_is_the_specified_copy():

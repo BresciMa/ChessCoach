@@ -11,7 +11,15 @@ from PySide6.QtWidgets import QApplication, QPushButton
 from chesscoach.coach.session import CoachSession
 from chesscoach.engine.uci import EngineResult
 from chesscoach.config import AppConfig
-from chesscoach.messages import MSG_BOARD_LOST, MSG_FOLLOWING, MSG_WE_WON, TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
+from chesscoach.messages import (
+    MSG_BOARD_LOST,
+    MSG_FOLLOWING,
+    MSG_NEW_GAME_WHITE,
+    MSG_WE_WON,
+    TRAINING_ACCEPT,
+    TRAINING_BADGE,
+    TRAINING_TEXT,
+)
 from chesscoach.types import Level, Reason
 from chesscoach.ui.board_overlay import BoardOverlay
 from chesscoach.ui.coach_window import CoachWindow
@@ -241,6 +249,21 @@ def test_chat_marks_user_system_board_and_coach(qapp):
     assert window.avatar.toolTip() == "O coach ficou cego"
     assert "coach" in text
     assert "A posição pede um lance calmo." in text
+    window.close()
+
+
+def test_a_new_game_replaces_the_chat(qapp):
+    session = CoachSession(AppConfig(training_accepted=True), engine=_Silent(), llm=_Silent())
+    window = CoachWindow(session)
+    window.show()
+    qapp.processEvents()
+    window._append("frase velha", "coach")
+    session.messages = [MSG_NEW_GAME_WHITE]
+    session._chat_reset = True
+    window._on_timer()
+    text = window.chat.toPlainText()
+    assert "frase velha" not in text
+    assert MSG_NEW_GAME_WHITE in text
     window.close()
 
 
