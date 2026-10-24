@@ -8,12 +8,20 @@ from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from chesscoach.types import Orientation
 from chesscoach.ui.calibration import MARK_CODE, CalibrationDialog, RubberBand
 
 
 @pytest.fixture
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+def test_reopened_mapping_shows_black_at_the_bottom(qapp):
+    dialog = CalibrationDialog()
+    dialog.show_saved(Orientation.BLACK_AT_BOTTOM, "b")
+    assert dialog.orientation.currentText() == "Eu jogo de Pretas embaixo"
+    assert dialog.side.currentText() == "Jogam as Pretas"
 
 
 def test_mark_leaves_the_modal_dialog_before_the_drag(qapp):

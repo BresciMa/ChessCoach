@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import html
 import time
+from pathlib import Path
 
 import chess
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,6 +59,7 @@ QPushButton#toolButton {
 QPushButton#toolButton:disabled { color: #667; }
 QLabel#trainingBadge { color: #9ad7ff; }
 QLabel#levelLabel { color: #d5deee; }
+QLabel#thinkingLabel { color: #9ad7ff; }
 """
 
 _BOARD_LINES = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE, MSG_UNREADABLE}
@@ -121,7 +123,13 @@ class CoachWindow(QWidget):
         self._asked = False
         self._drag_guard = False
         self._released = False
+        self._thinking = False
+        self._thinking_fen: str | None = None
+        self._think_dots = 1
+        self._job = None
+        self._job_fen: str | None = None
         self.on_quit = None
+        self.session.defer_comments = True
 
         root = QHBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -131,19 +139,33 @@ class CoachWindow(QWidget):
         title_row = QHBoxLayout(self.title)
         title_row.setContentsMargins(0, 0, 0, 0)
         self.avatar = QLabel()
-        self._avatar_awake = _avatar(28, blind=False)
-        self._avatar_blind = _avatar(28, blind=True)
+        self._avatar_awake = _jose(False)
+        self._avatar_blind = _jose(True)
         self.avatar.setPixmap(self._avatar_awake)
-        self.avatar.setFixedSize(28, 28)
-        self.name_label = QLabel("Chess Coach")
+        self.avatar.setFixedSize(90, 90)
+        identity = QVBoxLayout()
+        identity.setContentsMargins(0, 0, 0, 0)
+        identity.setSpacing(0)
+        self.name_label = QLabel("José")
         self.level_label = QLabel(LEVEL_LABELS[session.config.level])
         self.level_label.setObjectName("levelLabel")
         self.training_label = QLabel(TRAINING_BADGE)
         self.training_label.setObjectName("trainingBadge")
-        title_row.addWidget(self.avatar)
-        title_row.addWidget(self.name_label)
-        title_row.addWidget(self.level_label)
-        title_row.addWidget(self.training_label)
+        meta = QHBoxLayout()
+        meta.setContentsMargins(0, 0, 0, 0)
+        meta.setSpacing(8)
+        meta.addWidget(self.level_label)
+        meta.addWidget(self.training_label)
+        meta.addStretch(1)
+        self.thinking_label = QLabel("")
+        self.thinking_label.setObjectName("thinkingLabel")
+        self.thinking_label.setFixedHeight(22)
+        identity.addWidget(self.name_label)
+        identity.addLayout(meta)
+        identity.addWidget(self.thinking_label)
+        identity.addStretch(1)
+        title_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addLayout(identity)
         title_row.addStretch(1)
         minimize = QPushButton("–")
         minimize.setObjectName("toolButton")
@@ -153,8 +175,11 @@ class CoachWindow(QWidget):
         self.close_button.setObjectName("toolButton")
         self.close_button.setToolTip("Fechar")
         self.close_button.clicked.connect(self._quit_application)
-        title_row.addWidget(minimize)
-        title_row.addWidget(self.close_button)
+        title_row.addWidget(minimize, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+        self._think_timer = QTimer(self)
+        self._think_timer.setInterval(400)
+        self._think_timer.timeout.connect(self._tick_thinking)
         column.addWidget(self.title)
 
         self.chat = QTextEdit()
@@ -240,6 +265,7 @@ class CoachWindow(QWidget):
             return
         self._released = True
         get("ui").info("janela encerrada")
+        self._think_timer.stop()
         self.timer.stop()
         self.overlay.hide()
         self.training_dialog.setModal(False)
@@ -287,6 +313,65 @@ class CoachWindow(QWidget):
             f'<span style="color:#e8eef7">{body}</span></p>'
         )
 
+    def _set_thinking(self, on: bool) -> None:
+        if on == self._thinking:
+            return
+        self._thinking = on
+        if on:
+            get("ui").info("pensando ligado")
+            self._think_dots = 1
+            self._paint_thinking()
+            self._think_timer.start()
+            return
+        get("ui").info("pensando desligado")
+        self._think_timer.stop()
+        self.thinking_label.setText("")
+
+    def _paint_thinking(self) -> None:
+        self.thinking_label.setText("Pensando" + ("." * self._think_dots))
+
+    def _tick_thinking(self) -> None:
+        self._think_dots = self._think_dots % 3 + 1
+        self._paint_thinking()
+
+    def _sync_thinking(self) -> None:
+        fen = self.session.game.fen
+        due = (self._job is not None and self._job_fen == fen) or self.session.waiting_fen() == fen
+        if due:
+            if self._thinking_fen != fen:
+                if self._thinking:
+                    self._set_thinking(False)
+                self._set_thinking(True)
+                self._thinking_fen = fen
+            return
+        if self._thinking:
+            self._set_thinking(False)
+        self._thinking_fen = None
+
+    def _start_queued_comment(self) -> None:
+        if self._job is None and not self._released:
+            item = self.session.take_comment()
+            if item is not None:
+                reason, user_text, fen = item
+                self._job_fen = fen
+                job = _CommentJob(self.session, reason, user_text)
+                job.finished_comment.connect(self._on_comment_done)
+                self._job = job
+                job.start()
+        self._sync_thinking()
+
+    def _on_comment_done(self, prepared) -> None:
+        job = self._job
+        self._job = None
+        self.session.release_comment()
+        if not self._released and prepared is not None and self.session.commit_comment(prepared) and prepared.text:
+            self._show(prepared.text)
+            self._sync_overlay()
+        if job is not None:
+            job.deleteLater()
+        if not self._released:
+            self._start_queued_comment()
+
     def _set_blind(self, blind: bool) -> None:
         self.avatar.setPixmap(self._avatar_blind if blind else self._avatar_awake)
         self.avatar.setToolTip(_BLIND_TIP if blind else "")
@@ -314,6 +399,7 @@ class CoachWindow(QWidget):
         reply = self.session.send_chat(text)
         if reply:
             self._show(reply)
+        self._start_queued_comment()
         self._sync_overlay()
 
     def _hint(self) -> None:
@@ -322,6 +408,7 @@ class CoachWindow(QWidget):
         reply = self.session.request_hint()
         if reply:
             self._show(reply)
+        self._start_queued_comment()
         self._sync_overlay()
 
     def _pause(self) -> None:
@@ -381,6 +468,8 @@ class CoachWindow(QWidget):
             dialog.monitor.addItem(screen.name() or f"Monitor {index + 1}", index)
         if self.session.config.monitor < dialog.monitor.count():
             dialog.monitor.setCurrentIndex(self.session.config.monitor)
+        turn = "w" if self.session.game.board.turn == chess.WHITE else "b"
+        dialog.show_saved(self.session.config.orientation, turn)
         while True:
             code = dialog.exec()
             if code != MARK_CODE:
@@ -411,8 +500,14 @@ class CoachWindow(QWidget):
         if code == 1:
             message = self.session.follow_from_start()
         else:
+            side = dialog.side.currentData() or "w"
+            chosen = "b" if str(side).startswith("b") else "w"
+            self.session._forced_side = chosen
+            self.session._clear_arrow()
+            self.overlay.hide()
+            QApplication.processEvents()
             frame = self.session.capture.grab(self.session.config.monitor, self.session.config.roi)
-            message = self.session.read_now(frame, dialog.side.currentData())
+            message = self.session.read_now(frame, chosen)
         self._set_blind(self.session.blind)
         if message:
             self._show(message)
@@ -438,6 +533,7 @@ class CoachWindow(QWidget):
             self._show(line)
         if MSG_PROMOTION in lines:
             self._ask_promotion(start)
+        self._start_queued_comment()
         self._sync_overlay()
 
     def _ask_promotion(self, start: int) -> None:
@@ -456,6 +552,7 @@ class CoachWindow(QWidget):
             layout.addWidget(button)
         dialog.exec()
         self.session.confirm_promotion(chosen["piece"])
+        self._start_queued_comment()
         for line in self.session.messages[start:]:
             if line != MSG_PROMOTION and line not in self.chat.toPlainText():
                 self._show(line)
@@ -486,6 +583,32 @@ def _arrow_squares(session, san: str | None) -> tuple[str, str] | None:
     except ValueError:
         return None
     return chess.square_name(move.from_square), chess.square_name(move.to_square)
+
+
+class _CommentJob(QThread):
+    finished_comment = Signal(object)
+
+    def __init__(self, session, reason, user_text):
+        super().__init__()
+        self._session = session
+        self._reason = reason
+        self._user_text = user_text
+
+    def run(self) -> None:
+        try:
+            prepared = self._session.prepare_comment(self._reason, self._user_text)
+        except Exception:
+            get("ui").exception("comentario falhou")
+            prepared = None
+        self.finished_comment.emit(prepared)
+
+
+def _jose(blind: bool) -> QPixmap:
+    path = Path(__file__).with_name("jose_blind.png" if blind else "jose.png")
+    pixmap = QPixmap(str(path))
+    if pixmap.isNull():
+        return _avatar(90, blind)
+    return pixmap.scaled(90, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
 def _avatar(size: int, blind: bool = False) -> QPixmap:

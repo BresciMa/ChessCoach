@@ -20,7 +20,7 @@ from chesscoach.messages import (
 from chesscoach.types import Frame, Level, Message, Orientation, Reason, Rect, Theme
 from chesscoach.vision.classifier import BoardRead, SquareRead, TemplateClassifier
 from chesscoach.vision.themes import placement_from_board, render_board
-from tests.images import board_image, solid
+from tests.images import board_image, solid, tint
 
 
 class FakeEngine:
@@ -95,7 +95,8 @@ class _FailOnce:
         return self.inner.read_board(frame, orientation, theme, side_to_move)
 
 
-def test_the_users_own_move_is_quiet_and_the_reply_is_not():
+def test_the_users_own_move_is_quiet_and_the_reply_is_not(caplog):
+    import logging
     start = board_image(chess.Board())
     white = chess.Board()
     white.push_san("e4")
@@ -104,21 +105,117 @@ def test_the_users_own_move_is_quiet_and_the_reply_is_not():
     own = board_image(white)
     reply = board_image(black)
     session, engine, llm = _session([start, own, own, own, reply, reply, reply])
-    session.poll(0)
-    session.poll(250)
-    session.poll(350)
-    session.poll(750)
-    assert engine.calls == 0
-    assert session.messages == []
-    assert session.game.sans == ["e4"]
-    session.poll(1000)
-    session.poll(1100)
-    lines = session.poll(1500)
+    with caplog.at_level(logging.INFO, logger="chesscoach.session"):
+        session.poll(0)
+        session.poll(250)
+        session.poll(350)
+        session.poll(750)
+        assert engine.calls == 0
+        assert session.messages == []
+        assert session.game.sans == ["e4"]
+        session.poll(1000)
+        session.poll(1100)
+        lines = session.poll(1500)
+    assert sum(record.message == "movimento detectado" for record in caplog.records) == 2
     assert engine.calls == 1
     assert lines
     assert "O adversário acabou de jogar" in llm.prompts[-1][-1].content
     assert "Nh6" not in llm.prompts[-1][-1].content
     assert session.overlay_state().arrow is None
+
+
+def test_a_deferred_comment_waits_and_a_changed_position_is_dropped(caplog):
+    import logging
+
+    session, engine, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1)
+    session.defer_comments = True
+    with caplog.at_level(logging.INFO, logger="chesscoach.session"):
+        session._request_comment(Reason.MOVE_CONFIRMED, None)
+    assert engine.calls == 0
+    assert llm.prompts == []
+    first = session.take_comment()
+    assert first is not None
+    session._request_comment(Reason.HINT_REQUESTED, None)
+    assert session.take_comment() is None
+    prepared = session.prepare_comment(*first[:2])
+    session.game.apply(session.game.parse_san("e4"))
+    session._request_comment(Reason.MOVE_CONFIRMED, None)
+    with caplog.at_level(logging.INFO, logger="chesscoach.session"):
+        assert session.commit_comment(prepared) is False
+    assert any(record.message == "comentario descartado" for record in caplog.records)
+    assert session.messages == []
+    session.release_comment()
+    waiting = session.take_comment()
+    assert waiting is not None
+    assert waiting[0] == Reason.MOVE_CONFIRMED
+    assert waiting[2] == session.game.fen
+
+
+def test_the_arrow_stays_on_its_mark_and_goes_when_the_piece_moves(caplog):
+    import logging
+
+    start = board_image(chess.Board())
+    white = chess.Board()
+    white.push_san("e4")
+    black = white.copy()
+    black.push_san("e5")
+    own = board_image(white)
+    reply = board_image(black)
+    marked = tint(reply, ["a2"])
+    moved_board = black.copy()
+    moved_board.push_san("Nf3")
+    played = board_image(moved_board)
+    moved_marked = tint(played, ["a2"])
+    session, engine, _llm = _session(
+        [
+            start,
+            own,
+            own,
+            own,
+            reply,
+            reply,
+            reply,
+            marked,
+            marked,
+            marked,
+            moved_marked,
+            moved_marked,
+            moved_marked,
+            played,
+            played,
+            played,
+        ],
+        level=Level.LEVEL_1,
+        arrows=True,
+    )
+    engine.result = EngineResult(22, ["g1f3"])
+    with caplog.at_level(logging.INFO, logger="chesscoach.session"):
+        session.poll(0)
+        session.poll(250)
+        session.poll(350)
+        session.poll(750)
+        session.poll(1000)
+        session.poll(1100)
+        session.poll(1500)
+        assert session.overlay_state().arrow == "Nf3"
+        session.poll(1750)
+        session.poll(1850)
+        session.poll(2250)
+        assert session.overlay_state().arrow == "Nf3"
+        assert session.game.sans == ["e4", "e5"]
+        session.poll(2500)
+        session.poll(2600)
+        session.poll(3000)
+        assert session.overlay_state().arrow is None
+        assert session.game.sans == ["e4", "e5"]
+        session.poll(3250)
+        session.poll(3350)
+        session.poll(3750)
+    messages = [record.message for record in caplog.records]
+    assert "seta na referencia" in messages
+    assert "seta apagada" in messages
+    assert session.overlay_state().arrow is None
+    assert session.game.sans == ["e4", "e5", "Nf3"]
 
 
 def test_hint_reveals_one_move_and_master_does_not_suggest_the_next():
@@ -216,6 +313,43 @@ def test_several_missed_moves_are_reread_and_the_advice_uses_the_new_position():
     assert engine.calls == 1
     assert lines
     assert "d5" in llm.prompts[-1][-1].content
+
+
+def test_a_failed_read_keeps_the_requested_side_for_the_next_look():
+    image = board_image(chess.Board())
+    session, _, _ = _session([image])
+    board = chess.Board()
+    board.push_san("e4")
+    session.classifier = _FailThenHonorSide(board)
+    assert session.read_now(Frame(image, 0), "b") == MSG_UNREADABLE
+    assert session.game.board.turn == chess.WHITE
+    session.tracker.last_image = image
+    session._reconnect(0)
+    assert session.game.board.turn == chess.BLACK
+    assert session.game.board.piece_at(chess.E4) is not None
+    assert session._forced_side is None
+    session._forced_side = "b"
+    session.follow_from_start()
+    assert session._forced_side is None
+    assert session.game.board.fen() == chess.STARTING_FEN
+
+
+class _FailThenHonorSide:
+    def __init__(self, board: chess.Board):
+        self.board = board
+        self.calls = 0
+
+    def read_board(self, frame, orientation, theme, side_to_move="w"):
+        self.calls += 1
+        if self.calls == 1:
+            return BoardRead([], False, None)
+        parts = self.board.fen().split(" ")
+        parts[1] = "b" if str(side_to_move).startswith("b") else "w"
+        squares = [
+            SquareRead(chess.square_name(square), piece.symbol(), 0.99)
+            for square, piece in self.board.piece_map().items()
+        ]
+        return BoardRead(squares, True, " ".join(parts))
 
 
 def test_calibration_stores_orientation_when_qt_returns_text(tmp_path):

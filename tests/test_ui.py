@@ -1,4 +1,5 @@
 import os
+import threading
 
 import pytest
 
@@ -8,9 +9,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from chesscoach.coach.session import CoachSession
+from chesscoach.engine.uci import EngineResult
 from chesscoach.config import AppConfig
 from chesscoach.messages import MSG_BOARD_LOST, MSG_FOLLOWING, TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
-from chesscoach.types import Level
+from chesscoach.types import Level, Reason
 from chesscoach.ui.board_overlay import BoardOverlay
 from chesscoach.ui.coach_window import CoachWindow
 from chesscoach.ui.settings_dialog import SettingsDialog
@@ -19,6 +21,73 @@ from chesscoach.ui.settings_dialog import SettingsDialog
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+def test_jose_keeps_a_quiet_line_until_a_reply_is_on_the_way(qapp, caplog):
+    import logging
+
+    session = CoachSession(AppConfig(), engine=_Silent(), llm=_Silent())
+    window = CoachWindow(session)
+    window.show()
+    qapp.processEvents()
+    assert window.name_label.text() == "José"
+    assert window.avatar.width() == 90
+    assert window.avatar.height() == 90
+    assert not window._avatar_awake.isNull()
+    assert not window._avatar_blind.isNull()
+    assert window.thinking_label.text() == ""
+    with caplog.at_level(logging.INFO, logger="chesscoach.ui"):
+        window._set_thinking(True)
+        assert window.thinking_label.text() == "Pensando."
+        window._tick_thinking()
+        assert window.thinking_label.text() == "Pensando.."
+        window._set_thinking(False)
+        assert window.thinking_label.text() == ""
+        window._set_thinking(True)
+        assert window.thinking_label.text() == "Pensando."
+    messages = [record.message for record in caplog.records]
+    assert messages.count("pensando ligado") == 2
+    assert messages.count("pensando desligado") == 1
+    window.close()
+
+
+def test_a_late_phrase_is_dropped_and_thinking_returns_on_the_next_move(qapp, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setattr("chesscoach.coach.orchestrator.api_key_present", lambda: True)
+    engine = _Gate()
+    session = CoachSession(AppConfig(training_accepted=True, level=Level.LEVEL_1), engine=engine, llm=engine)
+    window = CoachWindow(session)
+    window.show()
+    qapp.processEvents()
+    with caplog.at_level(logging.INFO, logger="chesscoach"):
+        session._request_comment(Reason.MOVE_CONFIRMED, None)
+        window._start_queued_comment()
+        assert window.thinking_label.text() == "Pensando."
+        assert engine.entered.wait(2)
+        session.game.apply(session.game.parse_san("e4"))
+        window._start_queued_comment()
+        assert window.thinking_label.text() == ""
+        engine.go.set()
+        for _ in range(100):
+            qapp.processEvents()
+            if window._job is None and not engine.busy:
+                break
+        assert "frase velha" not in window.chat.toPlainText()
+        session._request_comment(Reason.MOVE_CONFIRMED, None)
+        window._start_queued_comment()
+        assert window.thinking_label.text() == "Pensando."
+        engine.go.set()
+        for _ in range(100):
+            qapp.processEvents()
+            if "frase nova" in window.chat.toPlainText():
+                break
+    assert window.thinking_label.text() == ""
+    messages = [record.message for record in caplog.records]
+    assert "pensando ligado" in messages
+    assert "pensando desligado" in messages
+    assert "comentario descartado" in messages
+    window.close()
 
 
 def test_dialog_blocks_coach_until_accepted_and_badge_stays(qapp):
@@ -163,6 +232,30 @@ def test_overlay_window_lets_clicks_through(qapp):
     overlay = BoardOverlay()
     assert overlay.windowFlags() & Qt.WindowType.WindowTransparentForInput
     assert TRAINING_ACCEPT == "Entendi e aceito"
+
+
+class _Gate:
+    def __init__(self):
+        self.entered = threading.Event()
+        self.go = threading.Event()
+        self.calls = 0
+        self.busy = False
+
+    def analyze(self, fen):
+        self.calls += 1
+        self.busy = True
+        self.entered.set()
+        self.go.wait(2)
+        self.go.clear()
+        self.busy = False
+        if " b " in fen:
+            return EngineResult(10, ["e7e5"])
+        return EngineResult(10, ["e2e4"])
+
+    def complete(self, messages, model):
+        if self.calls == 1:
+            return "frase velha"
+        return "frase nova"
 
 
 class _Silent:

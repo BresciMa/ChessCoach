@@ -152,6 +152,16 @@ class CalibrationDialog(QDialog):
         row.addWidget(self.read_button)
         layout.addLayout(row)
 
+    def show_saved(self, orientation, side: str) -> None:
+        orientation_index = self.orientation.findData(orientation)
+        if orientation_index < 0:
+            orientation_index = self.orientation.findData(getattr(orientation, "value", orientation))
+        if orientation_index >= 0:
+            self.orientation.setCurrentIndex(orientation_index)
+        side_index = self.side.findData(side)
+        if side_index >= 0:
+            self.side.setCurrentIndex(side_index)
+
     def _mark(self) -> None:
         self.done(MARK_CODE)
 

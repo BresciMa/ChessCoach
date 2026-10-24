@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,14 @@ class OverlayState:
     paused: bool = False
 
 
+@dataclass
+class PreparedComment:
+    fen: str
+    text: str | None
+    decision: PolicyDecision
+    evaluation_cp: int | None
+
+
 class CoachSession:
     def __init__(
         self,
@@ -82,10 +91,18 @@ class CoachSession:
         self.last_eval_band: str | None = None
         self._arrow: str | None = None
         self._threats: list[str] = []
+        self._arrow_baselined = False
+        self._held_arrow: str | None = None
+        self._held_threats: list[str] = []
         self._pending_promotion = False
         self._board_lost = False
         self.blind = False
+        self.defer_comments = False
+        self._next_comment: tuple[Reason, str | None, str] | None = None
+        self._comment_busy = False
+        self._state_lock = threading.RLock()
         self._last_look: int | None = None
+        self._forced_side: str | None = None
         self._read_gate = RepeatGate(5.0)
         self.calibrator = RoiCalibrator()
 
@@ -111,8 +128,7 @@ class CoachSession:
         self.paused = not self.paused
         _LOG.info("pausa %s", "sim" if self.paused else "nao")
         if self.paused:
-            self._arrow = None
-            self._threats = []
+            self._clear_arrow()
         return self.paused
 
     def toggle_arrows(self) -> bool:
@@ -122,8 +138,7 @@ class CoachSession:
         if self.config.arrows_enabled and self._last_decision is not None:
             self._apply_decision(self._last_decision)
         else:
-            self._arrow = None
-            self._threats = []
+            self._clear_arrow()
         self.save()
         _LOG.info("setas %s", "sim" if self.config.arrows_enabled else "nao")
         return self.config.arrows_enabled
@@ -151,11 +166,11 @@ class CoachSession:
         if not self.config.training_accepted:
             return None
         self.game.reset()
+        self._forced_side = None
         self.tracker.reset_waiting_for_baseline()
         self._previous_cp = None
         self._last_facts = None
-        self._arrow = None
-        self._threats = []
+        self._clear_arrow()
         self._mark_blind(False)
         self._board_lost = False
         self._say(MSG_FOLLOWING)
@@ -173,7 +188,9 @@ class CoachSession:
         if not found.ok or not found.fen:
             if self.game.fen != before:
                 self.game.load_fen(before, self.game.history_known)
+            self._forced_side = _side_letter(side_to_move)
             return MSG_UNREADABLE
+        self._forced_side = None
         self.game.load_fen(found.fen, history_known=False)
         self.tracker.seed(frame.image)
         self._previous_cp = None
@@ -188,9 +205,14 @@ class CoachSession:
         san = self.tracker.confirm_promotion(piece)
         self._pending_promotion = False
         if san and self._user_to_move():
-            self._comment(Reason.MOVE_CONFIRMED, None)
+            _LOG.info("movimento detectado")
+            self._request_comment(Reason.MOVE_CONFIRMED, None)
 
     def poll(self, now_ms: int) -> list[str]:
+        with self._state_lock:
+            return self._poll_unlocked(now_ms)
+
+    def _poll_unlocked(self, now_ms: int) -> list[str]:
         start = len(self.messages)
         if not self.config.training_accepted or self.paused or self.config.roi is None:
             return []
@@ -220,7 +242,8 @@ class CoachSession:
                 self._board_lost = True
                 self._say(MSG_BOARD_LOST)
         elif result.kind == TrackerKind.BOARD_CHECK:
-            self._reconnect(now_ms)
+            if not self._absorb_arrow():
+                self._reconnect(now_ms)
         elif result.kind == TrackerKind.AMBIGUOUS:
             self._awaiting_move_text = True
             self._say(MSG_AMBIGUOUS)
@@ -228,18 +251,17 @@ class CoachSession:
             self._pending_promotion = True
             self._say(MSG_PROMOTION)
         elif result.kind == TrackerKind.MOVE_CONFIRMED:
-            self._arrow = None
-            self._threats = []
+            self._clear_arrow()
             if self._user_to_move():
-                self._comment(Reason.MOVE_CONFIRMED, None)
+                _LOG.info("movimento detectado")
+                self._request_comment(Reason.MOVE_CONFIRMED, None)
         return self.messages[start:]
 
     def request_hint(self) -> str | None:
         if not self.config.training_accepted:
             return None
         _LOG.info("dica pedida")
-        self._comment(Reason.HINT_REQUESTED, None)
-        return self.messages[-1] if self.messages else None
+        return self._request_comment(Reason.HINT_REQUESTED, None)
 
     def send_chat(self, text: str) -> str | None:
         if not self.config.training_accepted:
@@ -254,52 +276,124 @@ class CoachSession:
                 self.game.apply(move)
                 self.tracker.adopt_visual()
                 self._awaiting_move_text = False
-                self._comment(Reason.MOVE_CONFIRMED, None)
-                return self.messages[-1] if self.messages else None
-        self._comment(chat_reason(cleaned), cleaned)
-        return self.messages[-1] if self.messages else None
+                _LOG.info("movimento detectado")
+                return self._request_comment(Reason.MOVE_CONFIRMED, None)
+        return self._request_comment(chat_reason(cleaned), cleaned)
 
     def overlay_state(self) -> OverlayState:
         if self.paused or not self.config.arrows_enabled or self.config.roi is None:
             return OverlayState(False, None, [], paused=self.paused)
         return OverlayState(True, self._arrow, list(self._threats), paused=False)
 
+    def _request_comment(self, reason: Reason, user_text: str | None) -> str | None:
+        if self.defer_comments:
+            self._clear_arrow()
+            self._next_comment = (reason, user_text, self.game.fen)
+            return None
+        self._comment(reason, user_text)
+        return self.messages[-1] if self.messages else None
+
+    def take_comment(self) -> tuple[Reason, str | None, str] | None:
+        if self._comment_busy:
+            return None
+        item = self._next_comment
+        self._next_comment = None
+        if item is None:
+            return None
+        self._comment_busy = True
+        return item
+
+    def release_comment(self) -> None:
+        self._comment_busy = False
+
+    def waiting_fen(self) -> str | None:
+        if self._next_comment is None:
+            return None
+        return self._next_comment[2]
+
     def _comment(self, reason: Reason, user_text: str | None) -> None:
+        self.commit_comment(self.prepare_comment(reason, user_text))
+
+    def prepare_comment(self, reason: Reason, user_text: str | None) -> PreparedComment:
         if isinstance(self.engine, StockfishEngine):
             self.engine.path = self.config.stockfish_path
             self.engine.movetime_ms = self.config.engine_movetime_ms
         self.orchestrator.model = self.config.gemini_model
+        with self._state_lock:
+            snap = ChessGame(self.game.board, history_known=self.game.history_known)
+            snap.sans = list(self.game.sans)
+            fen = snap.fen
+            previous_cp = self._previous_cp
         engine_started = time.perf_counter()
-        result = self.engine.analyze(self.game.fen)
+        result = self.engine.analyze(fen)
         engine_ms = int((time.perf_counter() - engine_started) * 1000)
-        facts = self.analyzer.analyze(self.game, result, self._previous_cp)
-        if result is not None:
-            self._previous_cp = result.evaluation_cp
-        self._last_facts = facts
+        facts = self.analyzer.analyze(snap, result, previous_cp)
         turn = self.orchestrator.respond(facts, self.config.level, reason, user_text)
         if turn.text == MSG_NO_ENGINE and self.config.stockfish_path:
             turn.text = MSG_ENGINE_SILENT
-        self._last_decision = turn.decision
-        self.last_eval_band = turn.decision.eval_band
-        self._apply_decision(turn.decision)
         _LOG.info(
             "coach motivo=%s motor=%s motor_ms=%s llm_ms=%s fen=%s",
             reason.value,
             "sim" if result is not None else "nao",
             engine_ms,
             "-" if turn.llm_ms is None else turn.llm_ms,
-            self.game.board.fen(),
+            fen,
         )
-        if turn.text:
-            self._say(turn.text)
+        evaluation = result.evaluation_cp if result is not None else None
+        return PreparedComment(fen, turn.text, turn.decision, evaluation)
+
+    def commit_comment(self, prepared: PreparedComment) -> bool:
+        if prepared.fen != self.game.fen:
+            _LOG.info("comentario descartado")
+            return False
+        if prepared.evaluation_cp is not None:
+            self._previous_cp = prepared.evaluation_cp
+        self._last_facts = None
+        self._last_decision = prepared.decision
+        self.last_eval_band = prepared.decision.eval_band
+        self._apply_decision(prepared.decision)
+        if prepared.text:
+            self._say(prepared.text)
+        return True
 
     def _apply_decision(self, decision: PolicyDecision) -> None:
         if self.paused or not self.config.arrows_enabled:
-            self._arrow = None
-            self._threats = []
+            self._clear_arrow()
             return
         self._arrow = decision.arrow
         self._threats = list(decision.threat_squares)
+        self._arrow_baselined = False
+        self._drop_held_arrow()
+
+    def _absorb_arrow(self) -> bool:
+        """O primeiro quadro da seta vira referência. O seguinte apaga a seta sem ser lido."""
+        if not self._arrow:
+            return False
+        if not self._arrow_baselined:
+            image = self.tracker.last_image
+            if image is None:
+                return False
+            self.tracker.seed(image)
+            self._arrow_baselined = True
+            _LOG.info("seta na referencia")
+            return True
+        self._held_arrow = self._arrow
+        self._held_threats = list(self._threats)
+        self._arrow = None
+        self._threats = []
+        self._arrow_baselined = False
+        _LOG.info("seta apagada")
+        return True
+
+    def _clear_arrow(self) -> None:
+        self._arrow = None
+        self._threats = []
+        self._arrow_baselined = False
+        self._drop_held_arrow()
+
+    def _drop_held_arrow(self) -> None:
+        self._held_arrow = None
+        self._held_threats = []
 
     def _user_to_move(self) -> bool:
         user_white = self.config.orientation == Orientation.WHITE_AT_BOTTOM
@@ -330,7 +424,7 @@ class CoachSession:
         lost = self._board_lost
         before = self.game.fen
         known = self.game.history_known
-        side = "w" if self.game.board.turn == chess.WHITE else "b"
+        side = self._forced_side or ("w" if self.game.board.turn == chess.WHITE else "b")
         found = self.classifier.read_board(
             Frame(image=image, time_ms=0),
             self.config.orientation,
@@ -339,6 +433,7 @@ class CoachSession:
         )
         self._log_read("acompanhamento", found)
         if not found.ok or not found.fen:
+            self._drop_held_arrow()
             if self.game.fen != before:
                 self.game.load_fen(before, known)
             if _mean_confidence(found) < _LOST_MEAN_CONFIDENCE:
@@ -347,12 +442,23 @@ class CoachSession:
                     self._board_lost = True
                     self._say(MSG_BOARD_LOST)
             return
+        if self._forced_side:
+            self._forced_side = None
+            self.game.load_fen(found.fen, history_known=False)
+            self.tracker.seed(image)
+            self._previous_cp = None
+            self._last_facts = None
+            self._drop_held_arrow()
+            self._mark_blind(False)
+            self._board_lost = False
+            return
         placement = {item.square: item.piece for item in found.squares if item.piece}
         paths = shortest_replays(self.game.board, placement)
         same_pieces = paths == [[]]
         piece_diff = _piece_diff_count(self.game.board, placement)
         if not paths and piece_diff <= 3:
             _LOG.info("leitura ignorada pecas=%s sem sequencia legal", piece_diff)
+            self._drop_held_arrow()
             return
         if len(paths) == 1:
             for move in paths[0]:
@@ -370,10 +476,20 @@ class CoachSession:
         self._last_facts = None
         self._mark_blind(False)
         if lost:
+            self._drop_held_arrow()
             self._note_board_back()
             return
+        if same_pieces and self._held_arrow:
+            self._arrow = self._held_arrow
+            self._threats = list(self._held_threats)
+            self._drop_held_arrow()
+            self._arrow_baselined = False
+            return
+        self._drop_held_arrow()
+        if not same_pieces:
+            _LOG.info("movimento detectado")
         if not same_pieces and self._user_to_move():
-            self._comment(Reason.MOVE_CONFIRMED, None)
+            self._request_comment(Reason.MOVE_CONFIRMED, None)
 
     def _mark_blind(self, blind: bool) -> None:
         if self.blind == blind:
@@ -415,6 +531,10 @@ def _mean_confidence(found) -> float:
     if not found.squares:
         return 0.0
     return sum(item.confidence for item in found.squares) / len(found.squares)
+
+
+def _side_letter(side: str) -> str:
+    return "b" if str(side).startswith("b") else "w"
 
 
 def _fen_with_turn(fen: str, turn: chess.Color) -> str:
