@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 from chesscoach.coach.session import CoachSession
 from chesscoach.engine.uci import EngineResult
 from chesscoach.config import AppConfig
-from chesscoach.messages import MSG_BOARD_LOST, MSG_FOLLOWING, TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
+from chesscoach.messages import MSG_BOARD_LOST, MSG_FOLLOWING, MSG_WE_WON, TRAINING_ACCEPT, TRAINING_BADGE, TRAINING_TEXT
 from chesscoach.types import Level, Reason
 from chesscoach.ui.board_overlay import BoardOverlay
 from chesscoach.ui.coach_window import CoachWindow
@@ -82,11 +82,27 @@ def test_a_late_phrase_is_dropped_and_thinking_returns_on_the_next_move(qapp, ca
             qapp.processEvents()
             if "frase nova" in window.chat.toPlainText():
                 break
-    assert window.thinking_label.text() == ""
+        assert window.thinking_label.text() == ""
     messages = [record.message for record in caplog.records]
     assert "pensando ligado" in messages
     assert "pensando desligado" in messages
     assert "comentario descartado" in messages
+    window.close()
+
+
+def test_the_victory_line_shows_and_hides_with_the_mate(qapp):
+    session = CoachSession(AppConfig(training_accepted=True), engine=_Silent(), llm=_Silent())
+    window = CoachWindow(session)
+    window.show()
+    qapp.processEvents()
+    assert window.victory.text() == MSG_WE_WON
+    assert not window.victory.isVisible()
+    session.celebrating = True
+    window._sync_victory()
+    assert window.victory.isVisible()
+    session.celebrating = False
+    window._sync_victory()
+    assert not window.victory.isVisible()
     window.close()
 
 

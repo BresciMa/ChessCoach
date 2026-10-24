@@ -38,6 +38,7 @@ from chesscoach.messages import (
     MSG_SSL,
     MSG_UNREADABLE,
     MSG_UNSTABLE,
+    MSG_WE_WON,
     TRAINING_BADGE,
 )
 from chesscoach.types import Level
@@ -60,6 +61,7 @@ QPushButton#toolButton:disabled { color: #667; }
 QLabel#trainingBadge { color: #9ad7ff; }
 QLabel#levelLabel { color: #d5deee; }
 QLabel#thinkingLabel { color: #9ad7ff; }
+QLabel#victoryBanner { color: #f0d060; font-size: 22px; font-weight: 700; }
 """
 
 _BOARD_LINES = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE, MSG_UNREADABLE}
@@ -181,6 +183,11 @@ class CoachWindow(QWidget):
         self._think_timer.setInterval(400)
         self._think_timer.timeout.connect(self._tick_thinking)
         column.addWidget(self.title)
+        self.victory = QLabel(MSG_WE_WON)
+        self.victory.setObjectName("victoryBanner")
+        self.victory.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.victory.hide()
+        column.addWidget(self.victory)
 
         self.chat = QTextEdit()
         self.chat.setObjectName("chatLog")
@@ -355,10 +362,17 @@ class CoachWindow(QWidget):
                 reason, user_text, fen = item
                 self._job_fen = fen
                 job = _CommentJob(self.session, reason, user_text)
+                job.arrow_ready.connect(self._on_arrow_ready)
                 job.finished_comment.connect(self._on_comment_done)
                 self._job = job
                 job.start()
         self._sync_thinking()
+
+    def _on_arrow_ready(self, fen: str, arrow: str, threats) -> None:
+        if self._released:
+            return
+        self.session.preview_arrow(fen, arrow, list(threats))
+        self._sync_overlay()
 
     def _on_comment_done(self, prepared) -> None:
         job = self._job
@@ -371,6 +385,9 @@ class CoachWindow(QWidget):
             job.deleteLater()
         if not self._released:
             self._start_queued_comment()
+
+    def _sync_victory(self) -> None:
+        self.victory.setVisible(self.session.celebrating)
 
     def _set_blind(self, blind: bool) -> None:
         self.avatar.setPixmap(self._avatar_blind if blind else self._avatar_awake)
@@ -509,6 +526,7 @@ class CoachWindow(QWidget):
             frame = self.session.capture.grab(self.session.config.monitor, self.session.config.roi)
             message = self.session.read_now(frame, chosen)
         self._set_blind(self.session.blind)
+        self._sync_victory()
         if message:
             self._show(message)
 
@@ -534,6 +552,7 @@ class CoachWindow(QWidget):
         if MSG_PROMOTION in lines:
             self._ask_promotion(start)
         self._start_queued_comment()
+        self._sync_victory()
         self._sync_overlay()
 
     def _ask_promotion(self, start: int) -> None:
@@ -586,6 +605,7 @@ def _arrow_squares(session, san: str | None) -> tuple[str, str] | None:
 
 
 class _CommentJob(QThread):
+    arrow_ready = Signal(str, str, object)
     finished_comment = Signal(object)
 
     def __init__(self, session, reason, user_text):
@@ -595,8 +615,12 @@ class _CommentJob(QThread):
         self._user_text = user_text
 
     def run(self) -> None:
+        def publish(fen: str, decision) -> None:
+            if decision.arrow:
+                self.arrow_ready.emit(fen, decision.arrow, list(decision.threat_squares))
+
         try:
-            prepared = self._session.prepare_comment(self._reason, self._user_text)
+            prepared = self._session.prepare_comment(self._reason, self._user_text, on_decision=publish)
         except Exception:
             get("ui").exception("comentario falhou")
             prepared = None

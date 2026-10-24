@@ -5,7 +5,7 @@ import os
 import chess
 import numpy as np
 
-from chesscoach.coach.session import CoachSession
+from chesscoach.coach.session import CoachSession, PreparedComment
 from chesscoach.config import AppConfig, load_config
 from chesscoach.engine.uci import EngineResult
 from chesscoach.messages import (
@@ -15,6 +15,7 @@ from chesscoach.messages import (
     MSG_NEED_ROI,
     MSG_NO_ENGINE,
     MSG_UNREADABLE,
+    MSG_WE_WON,
     TRAINING_TEXT,
 )
 from chesscoach.types import Frame, Level, Message, Orientation, Reason, Rect, Theme
@@ -149,6 +150,55 @@ def test_a_deferred_comment_waits_and_a_changed_position_is_dropped(caplog):
     assert waiting is not None
     assert waiting[0] == Reason.MOVE_CONFIRMED
     assert waiting[2] == session.game.fen
+
+
+def test_the_arrow_appears_before_the_model_answers():
+    session, engine, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1, arrows=True)
+    engine.result = EngineResult(35, ["e2e4"])
+    order: list[str] = []
+
+    def complete(messages, model: str) -> str:
+        order.append("gemini")
+        assert session.overlay_state().arrow == "e4"
+        return "frase"
+
+    def publish(fen: str, decision) -> None:
+        order.append("seta")
+        session.preview_arrow(fen, decision.arrow, decision.threat_squares)
+
+    llm.complete = complete
+    session.prepare_comment(Reason.MOVE_CONFIRMED, None, on_decision=publish)
+    assert order == ["seta", "gemini"]
+    assert session.overlay_state().arrow == "e4"
+
+
+def test_a_discarded_comment_clears_only_its_own_arrow():
+    session, engine, _llm = _session([board_image(chess.Board())], level=Level.LEVEL_1, arrows=True)
+    engine.result = EngineResult(35, ["e2e4"])
+
+    def publish(fen: str, decision) -> None:
+        session.preview_arrow(fen, decision.arrow, decision.threat_squares)
+
+    prepared = session.prepare_comment(Reason.MOVE_CONFIRMED, None, on_decision=publish)
+    assert session.overlay_state().arrow == "e4"
+    session._arrow_baselined = True
+    assert session.commit_comment(prepared)
+    assert session.overlay_state().arrow == "e4"
+    assert session._arrow_baselined is True
+
+    session._clear_arrow()
+    prepared = session.prepare_comment(Reason.MOVE_CONFIRMED, None, on_decision=publish)
+    old_fen = prepared.fen
+    move = session.game.parse_san("e4")
+    assert move is not None
+    session.game.apply(move)
+    assert session.commit_comment(prepared) is False
+    assert session.overlay_state().arrow is None
+
+    session.preview_arrow(session.game.fen, "e5", [])
+    stale = PreparedComment(old_fen, "velha", prepared.decision, None)
+    assert session.commit_comment(stale) is False
+    assert session.overlay_state().arrow == "e5"
 
 
 def test_the_arrow_stays_on_its_mark_and_goes_when_the_piece_moves(caplog):
@@ -350,6 +400,36 @@ class _FailThenHonorSide:
             for square, piece in self.board.piece_map().items()
         ]
         return BoardRead(squares, True, " ".join(parts))
+
+
+def test_the_mating_move_is_announced_and_then_the_win_shows():
+    session, engine, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1)
+    for san in ("e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6"):
+        session.game.apply(session.game.parse_san(san))
+    engine.result = EngineResult(99999, ["h5f7"])
+    session._comment(Reason.MOVE_CONFIRMED, None)
+    assert "O próximo lance é mate" in llm.prompts[-1][0].content
+    assert session.celebrating is False
+    session.game.apply(session.game.parse_san("Qxf7"))
+    session._sync_victory()
+    assert session.celebrating is True
+    assert MSG_WE_WON in session.messages
+
+
+def test_a_plain_move_and_a_loss_do_not_celebrate():
+    session, engine, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1)
+    engine.result = EngineResult(35, ["e2e4"])
+    session._comment(Reason.MOVE_CONFIRMED, None)
+    assert "O próximo lance é mate" not in llm.prompts[-1][0].content
+    session.game.apply(session.game.parse_san("e4"))
+    session._sync_victory()
+    assert session.celebrating is False
+    lost, _, _ = _session([board_image(chess.Board())])
+    for san in ("f3", "e5", "g4", "Qh4"):
+        lost.game.apply(lost.game.parse_san(san))
+    lost._sync_victory()
+    assert lost.celebrating is False
+    assert MSG_WE_WON not in lost.messages
 
 
 def test_calibration_stores_orientation_when_qt_returns_text(tmp_path):

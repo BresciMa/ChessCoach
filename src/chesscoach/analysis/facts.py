@@ -36,3 +36,4 @@ class CoachFacts:
     previous_move_plain: str | None = None
     opening_name: str | None = None
     candidate_moves_plain: list[str] = field(default_factory=list)
+    mate_on_next: bool = False

@@ -52,8 +52,11 @@ class CoachOrchestrator:
         level: Level,
         reason: Reason,
         user_text: str | None = None,
+        on_decision=None,
     ) -> Turn:
         decision = self.policy.apply(facts, level, reason)
+        if on_decision is not None:
+            on_decision(decision)
         if reason == Reason.MOVE_CONFIRMED and not decision.speak:
             return Turn(decision, None, False)
         if _engine_missing(facts) and level != Level.BEGINNER:
@@ -93,6 +96,12 @@ def build_messages(
         f"Faixa: {band}. Pedido: {ask}\n{payload}"
     )
     system = _SYSTEM + " " + _LEVEL_TONE[level]
+    if decision.facts_for_model.mate_on_next:
+        system += (
+            " O próximo lance é mate. Comece a frase com \"O próximo lance é mate!\"."
+            " Se best_move_plain existir, diga em seguida a peça e as casas."
+            " Se não existir, não nomeie casa de destino."
+        )
     return [Message("system", system), Message("user", user)]
 
 

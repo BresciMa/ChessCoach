@@ -39,6 +39,7 @@ MSG_LLM_FAILED = "Não consegui falar com o Gemini. Verifique a chave e a conex�
 MSG_NEED_ROI = "Marque o retângulo das 64 casas."
 MSG_PROMOTION = "Peão promovido. Escolha dama, torre, bispo ou cavalo."
 MSG_FOLLOWING = "Acompanhando desde a posição inicial."
+MSG_WE_WON = "Vencemos"
 CALIBRATION_HELP = "Arraste um retângulo só sobre as 64 casas, sem o relógio e sem as letras."
 KEY_HELP = (
     "A chave é a variável GEMINI_API_KEY, não um campo neste formulário. "

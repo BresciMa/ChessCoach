@@ -28,6 +28,17 @@ def _facts(**overrides) -> CoachFacts:
     return CoachFacts(**base)
 
 
+def test_level_two_speaks_when_the_next_move_is_mate():
+    decision = StockHelpPolicy().apply(
+        _facts(mate_on_next=True),
+        Level.LEVEL_2,
+        Reason.MOVE_CONFIRMED,
+    )
+    assert decision.speak is True
+    assert decision.facts_for_model.mate_on_next is True
+    assert decision.facts_for_model.best_move_san is None
+
+
 def test_level_two_hides_the_move_until_a_hint():
     policy = StockHelpPolicy()
     facts = _facts(hanging_squares=["d4"], threatened_squares=["d4"], own_king=KingFacts(True, True, True, False))

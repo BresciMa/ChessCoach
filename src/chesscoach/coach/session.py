@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from chesscoach.messages import (
     MSG_PROMOTION,
     MSG_UNREADABLE,
     MSG_UNSTABLE,
+    MSG_WE_WON,
 )
 from chesscoach.types import Frame, Level, Orientation, Reason, Theme, TrackerKind
 from chesscoach.vision.classifier import PieceClassifier, TemplateClassifier
@@ -90,6 +92,7 @@ class CoachSession:
         self._last_decision: PolicyDecision | None = None
         self.last_eval_band: str | None = None
         self._arrow: str | None = None
+        self._arrow_fen: str | None = None
         self._threats: list[str] = []
         self._arrow_baselined = False
         self._held_arrow: str | None = None
@@ -97,6 +100,7 @@ class CoachSession:
         self._pending_promotion = False
         self._board_lost = False
         self.blind = False
+        self.celebrating = False
         self.defer_comments = False
         self._next_comment: tuple[Reason, str | None, str] | None = None
         self._comment_busy = False
@@ -173,6 +177,7 @@ class CoachSession:
         self._clear_arrow()
         self._mark_blind(False)
         self._board_lost = False
+        self._sync_victory()
         self._say(MSG_FOLLOWING)
         _LOG.info("acompanhar do inicio")
         return None
@@ -197,6 +202,7 @@ class CoachSession:
         self._last_facts = None
         self._mark_blind(False)
         self._board_lost = False
+        self._sync_victory()
         _LOG.info("ler agora fen=%s", found.fen)
         return None
 
@@ -314,7 +320,12 @@ class CoachSession:
     def _comment(self, reason: Reason, user_text: str | None) -> None:
         self.commit_comment(self.prepare_comment(reason, user_text))
 
-    def prepare_comment(self, reason: Reason, user_text: str | None) -> PreparedComment:
+    def prepare_comment(
+        self,
+        reason: Reason,
+        user_text: str | None,
+        on_decision: Callable[[str, PolicyDecision], None] | None = None,
+    ) -> PreparedComment:
         if isinstance(self.engine, StockfishEngine):
             self.engine.path = self.config.stockfish_path
             self.engine.movetime_ms = self.config.engine_movetime_ms
@@ -328,7 +339,13 @@ class CoachSession:
         result = self.engine.analyze(fen)
         engine_ms = int((time.perf_counter() - engine_started) * 1000)
         facts = self.analyzer.analyze(snap, result, previous_cp)
-        turn = self.orchestrator.respond(facts, self.config.level, reason, user_text)
+        turn = self.orchestrator.respond(
+            facts,
+            self.config.level,
+            reason,
+            user_text,
+            on_decision=(lambda decision: on_decision(fen, decision)) if on_decision else None,
+        )
         if turn.text == MSG_NO_ENGINE and self.config.stockfish_path:
             turn.text = MSG_ENGINE_SILENT
         _LOG.info(
@@ -345,6 +362,8 @@ class CoachSession:
     def commit_comment(self, prepared: PreparedComment) -> bool:
         if prepared.fen != self.game.fen:
             _LOG.info("comentario descartado")
+            if self._arrow_fen == prepared.fen:
+                self._clear_arrow()
             return False
         if prepared.evaluation_cp is not None:
             self._previous_cp = prepared.evaluation_cp
@@ -352,6 +371,7 @@ class CoachSession:
         self._last_decision = prepared.decision
         self.last_eval_band = prepared.decision.eval_band
         self._apply_decision(prepared.decision)
+        self._arrow_fen = None
         if prepared.text:
             self._say(prepared.text)
         return True
@@ -360,10 +380,24 @@ class CoachSession:
         if self.paused or not self.config.arrows_enabled:
             self._clear_arrow()
             return
+        if self._arrow == decision.arrow and self._threats == list(decision.threat_squares):
+            return
         self._arrow = decision.arrow
         self._threats = list(decision.threat_squares)
         self._arrow_baselined = False
         self._drop_held_arrow()
+
+    def preview_arrow(self, fen: str, arrow: str | None, threats: list[str]) -> None:
+        if not arrow or fen != self.game.fen or self.paused or not self.config.arrows_enabled:
+            return
+        if self._arrow == arrow and self._threats == list(threats):
+            return
+        self._arrow = arrow
+        self._threats = list(threats)
+        self._arrow_fen = fen
+        self._arrow_baselined = False
+        self._drop_held_arrow()
+        _LOG.info("seta antecipada lance=%s", arrow)
 
     def _absorb_arrow(self) -> bool:
         """O primeiro quadro da seta vira referência. O seguinte apaga a seta sem ser lido."""
@@ -387,6 +421,7 @@ class CoachSession:
 
     def _clear_arrow(self) -> None:
         self._arrow = None
+        self._arrow_fen = None
         self._threats = []
         self._arrow_baselined = False
         self._drop_held_arrow()
@@ -451,6 +486,7 @@ class CoachSession:
             self._drop_held_arrow()
             self._mark_blind(False)
             self._board_lost = False
+            self._sync_victory()
             return
         placement = {item.square: item.piece for item in found.squares if item.piece}
         paths = shortest_replays(self.game.board, placement)
@@ -475,6 +511,7 @@ class CoachSession:
         self._previous_cp = None
         self._last_facts = None
         self._mark_blind(False)
+        self._sync_victory()
         if lost:
             self._drop_held_arrow()
             self._note_board_back()
@@ -490,6 +527,15 @@ class CoachSession:
             _LOG.info("movimento detectado")
         if not same_pieces and self._user_to_move():
             self._request_comment(Reason.MOVE_CONFIRMED, None)
+
+    def _sync_victory(self) -> None:
+        won = self.game.board.is_checkmate() and not self._user_to_move()
+        if won:
+            if not self.celebrating:
+                self.celebrating = True
+                self._say(MSG_WE_WON)
+            return
+        self.celebrating = False
 
     def _mark_blind(self, blind: bool) -> None:
         if self.blind == blind:

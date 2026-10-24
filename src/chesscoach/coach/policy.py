@@ -61,7 +61,7 @@ class StockHelpPolicy:
                 packet = _hide_moves(packet)
             speak = True
             if level == Level.LEVEL_2 and reason == Reason.MOVE_CONFIRMED:
-                speak = _has_alert(facts)
+                speak = _has_alert(facts) or facts.mate_on_next
                 threats = _threats(facts) if speak else []
             elif level == Level.LEVEL_2:
                 threats = _threats(facts)

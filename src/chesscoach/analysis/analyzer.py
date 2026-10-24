@@ -51,6 +51,7 @@ class PositionAnalyzer:
             development_black=_development(board, chess.BLACK),
             own_king=_king(board, board.turn, game.history_known),
             opponent_king=_king(board, not board.turn, game.history_known),
+            mate_on_next=_mate_on_next(board, engine),
         )
 
 
@@ -152,6 +153,20 @@ def _last_move(board: chess.Board, sans: list[str]) -> tuple[str | None, str | N
     symbol = piece.symbol()
     rule = PIECE_RULES[symbol.upper()]
     return san, PIECE_NAMES[symbol], rule, describe_move(probe, move)
+
+
+def _mate_on_next(board: chess.Board, engine: EngineResult | None) -> bool:
+    if engine is None or not engine.uci_moves:
+        return False
+    try:
+        move = chess.Move.from_uci(engine.uci_moves[0])
+    except ValueError:
+        return False
+    if move not in board.legal_moves:
+        return False
+    nxt = board.copy()
+    nxt.push(move)
+    return nxt.is_checkmate()
 
 
 def _engine_sans(
