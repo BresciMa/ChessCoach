@@ -9,8 +9,11 @@ import numpy as np
 
 from chesscoach.chess.game import ChessGame
 from chesscoach.config import AppConfig
+from chesscoach.log import RepeatGate, get
 from chesscoach.messages import MSG_UNSTABLE
 from chesscoach.types import Frame, TrackerKind, TrackerResult
+
+_LOG = get("vision")
 from chesscoach.vision.squares import (
     SQUARE_DIFF_THRESHOLD,
     changed_indices,
@@ -146,6 +149,7 @@ class PositionTracker:
         self._occlusion: np.ndarray | None = None
         self.last_image: np.ndarray | None = None
         self._seen: np.ndarray | None = None
+        self._trace_gate = RepeatGate(1.0)
 
     @property
     def interval_ms(self) -> int:
@@ -208,19 +212,37 @@ class PositionTracker:
         if event == _WatchEvent.BASELINE:
             self._committed = signature
             self._last_stable = signature
+            self._trace(frame.time_ms, "baseline casas=0 plano=%s" % _yes(self.current_is_flat()))
             return TrackerResult(TrackerKind.NO_CHANGE)
         if event == _WatchEvent.NONE:
             return TrackerResult(TrackerKind.NO_CHANGE)
         if event == _WatchEvent.UNSTABLE:
+            self._trace(frame.time_ms, "instavel")
             return TrackerResult(TrackerKind.BOARD_UNSTABLE, message=MSG_UNSTABLE)
         self._last_stable = signature
         if self._lost:
-            return self._while_lost(signature)
+            result = self._while_lost(signature)
+            self._trace_result(frame.time_ms, result, signature)
+            return result
         result = self._interpret(signature)
         if result.kind == TrackerKind.BOARD_LOST:
             self._lost = True
             self._occlusion = signature.copy()
+        self._trace_result(frame.time_ms, result, signature)
         return result
+
+    def _trace_result(self, now_ms: int, result: TrackerResult, signature: np.ndarray) -> None:
+        if result.kind == TrackerKind.NO_CHANGE and not result.restored:
+            return
+        changed = len(self._changed(signature))
+        self._trace(
+            now_ms,
+            "%s casas=%s plano=%s restaurado=%s" % (result.kind.value, changed, _yes(self.current_is_flat()), _yes(result.restored)),
+        )
+
+    def _trace(self, now_ms: int, text: str) -> None:
+        if self._trace_gate.allow(text, now_ms / 1000):
+            _LOG.info("visao %s", text)
 
     def confirm_promotion(self, piece: str) -> str | None:
         if self._pending is None:
@@ -270,3 +292,7 @@ def _flat_image(image: np.ndarray | None) -> bool:
         return False
     luma = square_signature(image).mean(axis=1)
     return float(luma.max() - luma.min()) < 18.0
+
+
+def _yes(value: bool) -> str:
+    return "sim" if value else "nao"

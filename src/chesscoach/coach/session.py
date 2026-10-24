@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,12 +17,15 @@ from chesscoach.coach.policy import PolicyDecision, StockHelpPolicy
 from chesscoach.config import AppConfig, save_config
 from chesscoach.engine.uci import ChessEngine, StockfishEngine
 from chesscoach.llm.provider import LlmProvider
+from chesscoach.log import RepeatGate, get
 from chesscoach.messages import (
     MSG_AMBIGUOUS,
     MSG_BOARD_BACK,
     MSG_BOARD_LOST,
+    MSG_ENGINE_SILENT,
     MSG_FOLLOWING,
     MSG_NEED_ROI,
+    MSG_NO_ENGINE,
     MSG_PROMOTION,
     MSG_UNREADABLE,
     MSG_UNSTABLE,
@@ -29,7 +33,10 @@ from chesscoach.messages import (
 from chesscoach.types import Frame, Level, Orientation, Reason, Theme, TrackerKind
 from chesscoach.vision.classifier import PieceClassifier, TemplateClassifier
 from chesscoach.vision.roi import CalibrationError, RoiCalibrator
+from chesscoach.vision.square_model import MIN_CONFIDENCE
 from chesscoach.vision.tracker import PositionTracker
+
+_LOG = get("session")
 
 
 @dataclass
@@ -79,6 +86,7 @@ class CoachSession:
         self._board_lost = False
         self.blind = False
         self._last_look: int | None = None
+        self._read_gate = RepeatGate(5.0)
         self.calibrator = RoiCalibrator()
 
     def save(self) -> None:
@@ -92,13 +100,16 @@ class CoachSession:
     def accept_training(self) -> None:
         self.config.training_accepted = True
         self.save()
+        _LOG.info("treino aceito")
 
     def set_level(self, level: Level) -> None:
         self.config.level = level
         self.save()
+        _LOG.info("nivel %s", level.value)
 
     def toggle_pause(self) -> bool:
         self.paused = not self.paused
+        _LOG.info("pausa %s", "sim" if self.paused else "nao")
         if self.paused:
             self._arrow = None
             self._threats = []
@@ -114,6 +125,7 @@ class CoachSession:
             self._arrow = None
             self._threats = []
         self.save()
+        _LOG.info("setas %s", "sim" if self.config.arrows_enabled else "nao")
         return self.config.arrows_enabled
 
     def set_calibration(self, monitor: int, rect, orientation, theme=None) -> str | None:
@@ -130,6 +142,7 @@ class CoachSession:
         self.config.orientation = orientation
         self.config.theme = theme
         self.save()
+        _LOG.info("calibracao monitor=%s retangulo=%s orientacao=%s", monitor, rect, orientation.value)
         return None
 
     def follow_from_start(self) -> str | None:
@@ -143,9 +156,10 @@ class CoachSession:
         self._last_facts = None
         self._arrow = None
         self._threats = []
-        self.blind = False
+        self._mark_blind(False)
         self._board_lost = False
         self._say(MSG_FOLLOWING)
+        _LOG.info("acompanhar do inicio")
         return None
 
     def read_now(self, frame: Frame, side_to_move: str = "w") -> str | None:
@@ -155,6 +169,7 @@ class CoachSession:
             return None
         before = self.game.fen
         found = self.classifier.read_board(frame, self.config.orientation, self.config.theme, side_to_move)
+        self._log_read("agora", found)
         if not found.ok or not found.fen:
             if self.game.fen != before:
                 self.game.load_fen(before, self.game.history_known)
@@ -163,11 +178,13 @@ class CoachSession:
         self.tracker.seed(frame.image)
         self._previous_cp = None
         self._last_facts = None
-        self.blind = False
+        self._mark_blind(False)
         self._board_lost = False
+        _LOG.info("ler agora fen=%s", found.fen)
         return None
 
     def confirm_promotion(self, piece: str) -> None:
+        _LOG.info("promocao %s", piece)
         san = self.tracker.confirm_promotion(piece)
         self._pending_promotion = False
         if san and self._user_to_move():
@@ -182,22 +199,23 @@ class CoachSession:
         try:
             result = self.tracker.poll(now_ms)
         except Exception:
+            _LOG.exception("falha ao observar o quadro")
             self._say(MSG_UNREADABLE)
             return self.messages[start:]
         if result is None:
             return self.messages[start:]
         if result.restored:
-            self.blind = False
+            self._mark_blind(False)
             self._note_board_back()
         if result.kind == TrackerKind.NO_CHANGE:
             if self.blind:
                 self._look_again(now_ms)
             return self.messages[start:]
         if result.kind == TrackerKind.BOARD_UNSTABLE:
-            self.blind = True
+            self._mark_blind(True)
             self._say(MSG_UNSTABLE)
         elif result.kind == TrackerKind.BOARD_LOST:
-            self.blind = True
+            self._mark_blind(True)
             if not self._board_lost:
                 self._board_lost = True
                 self._say(MSG_BOARD_LOST)
@@ -219,6 +237,7 @@ class CoachSession:
     def request_hint(self) -> str | None:
         if not self.config.training_accepted:
             return None
+        _LOG.info("dica pedida")
         self._comment(Reason.HINT_REQUESTED, None)
         return self.messages[-1] if self.messages else None
 
@@ -228,6 +247,7 @@ class CoachSession:
         cleaned = text.strip()
         if not cleaned:
             return None
+        _LOG.info("usuario %s", cleaned[:180])
         if self._awaiting_move_text:
             move = self.game.parse_san(cleaned)
             if move is not None:
@@ -249,15 +269,27 @@ class CoachSession:
             self.engine.path = self.config.stockfish_path
             self.engine.movetime_ms = self.config.engine_movetime_ms
         self.orchestrator.model = self.config.gemini_model
+        engine_started = time.perf_counter()
         result = self.engine.analyze(self.game.fen)
+        engine_ms = int((time.perf_counter() - engine_started) * 1000)
         facts = self.analyzer.analyze(self.game, result, self._previous_cp)
         if result is not None:
             self._previous_cp = result.evaluation_cp
         self._last_facts = facts
         turn = self.orchestrator.respond(facts, self.config.level, reason, user_text)
+        if turn.text == MSG_NO_ENGINE and self.config.stockfish_path:
+            turn.text = MSG_ENGINE_SILENT
         self._last_decision = turn.decision
         self.last_eval_band = turn.decision.eval_band
         self._apply_decision(turn.decision)
+        _LOG.info(
+            "coach motivo=%s motor=%s motor_ms=%s llm_ms=%s fen=%s",
+            reason.value,
+            "sim" if result is not None else "nao",
+            engine_ms,
+            "-" if turn.llm_ms is None else turn.llm_ms,
+            self.game.board.fen(),
+        )
         if turn.text:
             self._say(turn.text)
 
@@ -280,7 +312,7 @@ class CoachSession:
     def _look_again(self, now_ms: int) -> None:
         """Enquanto cego, a imagem parada ainda pode ser o tabuleiro que já conhecíamos."""
         if self.tracker.matches_committed():
-            self.blind = False
+            self._mark_blind(False)
             self._board_lost = False
             return
         if not self.tracker.is_settled() or self.tracker.current_is_flat():
@@ -305,11 +337,12 @@ class CoachSession:
             self.config.theme,
             side,
         )
+        self._log_read("acompanhamento", found)
         if not found.ok or not found.fen:
             if self.game.fen != before:
                 self.game.load_fen(before, known)
             if _mean_confidence(found) < _LOST_MEAN_CONFIDENCE:
-                self.blind = True
+                self._mark_blind(True)
                 if not self._board_lost:
                     self._board_lost = True
                     self._say(MSG_BOARD_LOST)
@@ -317,6 +350,10 @@ class CoachSession:
         placement = {item.square: item.piece for item in found.squares if item.piece}
         paths = shortest_replays(self.game.board, placement)
         same_pieces = paths == [[]]
+        piece_diff = _piece_diff_count(self.game.board, placement)
+        if not paths and piece_diff <= 3:
+            _LOG.info("leitura ignorada pecas=%s sem sequencia legal", piece_diff)
+            return
         if len(paths) == 1:
             for move in paths[0]:
                 self.game.apply(move)
@@ -331,12 +368,34 @@ class CoachSession:
         self.tracker.seed(image)
         self._previous_cp = None
         self._last_facts = None
-        self.blind = False
+        self._mark_blind(False)
         if lost:
             self._note_board_back()
             return
         if not same_pieces and self._user_to_move():
             self._comment(Reason.MOVE_CONFIRMED, None)
+
+    def _mark_blind(self, blind: bool) -> None:
+        if self.blind == blind:
+            return
+        self.blind = blind
+        _LOG.info("avatar %s", "cego" if blind else "enxergando")
+
+    def _log_read(self, purpose: str, found) -> None:
+        low = sorted(
+            (item for item in found.squares if item.confidence < MIN_CONFIDENCE),
+            key=lambda item: item.confidence,
+        )
+        worst = ", ".join(f"{item.square}:{item.confidence:.2f}" for item in low[:4]) or "-"
+        text = "leitura %s ok=%s media=%.2f fen=%s piores=%s" % (
+            purpose,
+            "sim" if found.ok else "nao",
+            _mean_confidence(found),
+            found.fen or "-",
+            worst,
+        )
+        if self._read_gate.allow(text, time.monotonic()):
+            _LOG.info(text)
 
     def _say(self, text: str) -> None:
         self.messages.append(text)
@@ -344,6 +403,12 @@ class CoachSession:
 
 _LOST_MEAN_CONFIDENCE = 0.35
 _LOOK_AGAIN_MS = 1000
+
+
+def _piece_diff_count(board: chess.Board, placement: dict[str, str]) -> int:
+    current = {chess.square_name(square): piece.symbol() for square, piece in board.piece_map().items()}
+    squares = set(current) | set(placement)
+    return sum(1 for square in squares if current.get(square) != placement.get(square))
 
 
 def _mean_confidence(found) -> float:

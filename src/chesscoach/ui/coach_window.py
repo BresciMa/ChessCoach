@@ -20,12 +20,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from chesscoach.log import get
 from chesscoach.messages import (
     LEVEL_BLURBS,
     LEVEL_LABELS,
     MSG_AMBIGUOUS,
     MSG_BOARD_BACK,
     MSG_BOARD_LOST,
+    MSG_ENGINE_SILENT,
     MSG_FOLLOWING,
     MSG_LLM_FAILED,
     MSG_NEED_ROI,
@@ -63,6 +65,7 @@ _SILENT_BOARD = {MSG_BOARD_LOST, MSG_BOARD_BACK, MSG_UNSTABLE}
 _BLIND_TIP = "O coach ficou cego"
 _SYSTEM_LINES = {
     MSG_AMBIGUOUS,
+    MSG_ENGINE_SILENT,
     MSG_FOLLOWING,
     MSG_LLM_FAILED,
     MSG_NEED_ROI,
@@ -236,6 +239,7 @@ class CoachWindow(QWidget):
         if self._released:
             return
         self._released = True
+        get("ui").info("janela encerrada")
         self.timer.stop()
         self.overlay.hide()
         self.training_dialog.setModal(False)

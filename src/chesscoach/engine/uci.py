@@ -5,8 +5,13 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from chesscoach.log import get
+
+_LOG = get("engine")
 
 
 @dataclass
@@ -30,7 +35,9 @@ class StockfishEngine:
 
     def analyze(self, fen: str) -> EngineResult | None:
         if not self.path or not Path(self.path).is_file():
+            _LOG.debug("stockfish ausente")
             return None
+        started = time.perf_counter()
         try:
             process = subprocess.Popen(
                 [self.path],
@@ -40,7 +47,8 @@ class StockfishEngine:
                 text=True,
                 bufsize=1,
             )
-        except OSError:
+        except OSError as exc:
+            _LOG.error("stockfish nao abriu: %s", exc)
             return None
         lines: queue.Queue[str | None] = queue.Queue()
 
@@ -54,13 +62,32 @@ class StockfishEngine:
         thread.start()
         try:
             assert process.stdin is not None
+            _LOG.debug(">> position fen %s", fen)
+            _LOG.debug(">> go movetime %s", self.movetime_ms)
             process.stdin.write("uci\nsetoption name MultiPV value 3\nisready\n")
             process.stdin.write(f"position fen {fen}\n")
             process.stdin.write(f"go movetime {self.movetime_ms}\n")
             process.stdin.flush()
             collected = _collect(lines, timeout_s=max(2.0, self.movetime_ms / 1000 + 2))
-            return parse_uci(collected)
-        except (OSError, TimeoutError):
+            result = parse_uci(collected)
+            elapsed = (time.perf_counter() - started) * 1000
+            if result is None:
+                _LOG.error("stockfish sem lance util em %.0fms fen=%s", elapsed, fen)
+                return None
+            _LOG.debug(
+                "<< bestmove %s cp=%s lances=%s %.0fms",
+                result.best_move,
+                result.evaluation_cp,
+                " ".join(result.uci_moves),
+                elapsed,
+            )
+            return result
+        except TimeoutError:
+            elapsed = (time.perf_counter() - started) * 1000
+            _LOG.error("stockfish sem bestmove em %.0fms fen=%s", elapsed, fen)
+            return None
+        except OSError as exc:
+            _LOG.error("stockfish falhou: %s", exc or type(exc).__name__)
             return None
         finally:
             process.kill()

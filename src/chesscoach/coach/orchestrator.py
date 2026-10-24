@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass
 
 from chesscoach.analysis.facts import CoachFacts
 from chesscoach.coach.policy import HelpPolicy, PolicyDecision, StockHelpPolicy, is_hint_request
 from chesscoach.llm.gemini import LlmConnectionError, MissingApiKey, api_key_present
+from chesscoach.log import get
 from chesscoach.llm.provider import LlmProvider
 from chesscoach.messages import LEVEL_LABELS, MSG_LLM_FAILED, MSG_NO_ENGINE, MSG_NO_KEY, PIECE_RULES
 from chesscoach.types import Level, Message, Reason
@@ -35,6 +37,7 @@ class Turn:
     decision: PolicyDecision
     text: str | None
     called_llm: bool
+    llm_ms: int | None = None
 
 
 class CoachOrchestrator:
@@ -60,15 +63,20 @@ class CoachOrchestrator:
         if not api_key_present():
             return Turn(decision, MSG_NO_KEY, False)
         messages = build_messages(decision, level, reason, user_text)
+        started = time.perf_counter()
         try:
             text = self.llm.complete(messages, self.model)
         except MissingApiKey:
             return Turn(decision, MSG_NO_KEY, False)
         except LlmConnectionError as exc:
+            get("llm").error("gemini conexao: %s", exc)
             return Turn(decision, str(exc), False)
         except Exception:
+            get("llm").exception("gemini falhou")
             return Turn(decision, MSG_LLM_FAILED, False)
-        return Turn(decision, _one_line(text), True)
+        elapsed = int((time.perf_counter() - started) * 1000)
+        get("llm").info("gemini %sms modelo=%s", elapsed, self.model)
+        return Turn(decision, _one_line(text), True, elapsed)
 
 
 def build_messages(

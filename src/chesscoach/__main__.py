@@ -13,10 +13,14 @@ def main() -> None:
     from chesscoach.coach.session import CoachSession
     from chesscoach.config import default_config_path, load_config
     from chesscoach.engine.uci import StockfishEngine
+    from chesscoach.log import configure, consume_debug_flag, get
     from chesscoach.llm.gemini import GeminiProvider
     from chesscoach.ui.coach_window import CoachWindow
     from chesscoach.vision.classifier import TemplateClassifier
 
+    debug, argv = consume_debug_flag(sys.argv)
+    sys.argv = argv
+    logfile = configure(debug)
     app = QApplication(sys.argv)
     app.setApplicationName("Chess Coach")
     config = load_config()
@@ -27,6 +31,16 @@ def main() -> None:
         engine=StockfishEngine(config.stockfish_path, config.engine_movetime_ms),
         llm=GeminiProvider(),
         config_path=default_config_path(),
+    )
+    get("app").info(
+        "aberto debug=%s arquivo=%s nivel=%s roi=%s orientacao=%s stockfish=%s modelo=%s",
+        debug,
+        logfile,
+        config.level.value,
+        "sim" if config.roi else "nao",
+        config.orientation.value,
+        "sim" if config.stockfish_path else "nao",
+        config.gemini_model,
     )
     window = CoachWindow(session)
 

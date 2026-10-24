@@ -8,9 +8,17 @@ import numpy as np
 from chesscoach.coach.session import CoachSession
 from chesscoach.config import AppConfig, load_config
 from chesscoach.engine.uci import EngineResult
-from chesscoach.messages import MSG_BOARD_BACK, MSG_BOARD_LOST, MSG_NEED_ROI, MSG_UNREADABLE, TRAINING_TEXT
-from chesscoach.types import Frame, Level, Message, Orientation, Rect, Theme
-from chesscoach.vision.classifier import BoardRead, TemplateClassifier
+from chesscoach.messages import (
+    MSG_BOARD_BACK,
+    MSG_BOARD_LOST,
+    MSG_ENGINE_SILENT,
+    MSG_NEED_ROI,
+    MSG_NO_ENGINE,
+    MSG_UNREADABLE,
+    TRAINING_TEXT,
+)
+from chesscoach.types import Frame, Level, Message, Orientation, Reason, Rect, Theme
+from chesscoach.vision.classifier import BoardRead, SquareRead, TemplateClassifier
 from chesscoach.vision.themes import placement_from_board, render_board
 from tests.images import board_image, solid
 
@@ -326,6 +334,60 @@ def test_reading_or_following_wakes_the_coach():
     broken[0:40, 0:40] = (0, 0, 255)
     assert session.read_now(Frame(broken, 0)) == MSG_UNREADABLE
     assert session.blind is True
+
+
+class _StaticBoard:
+    def __init__(self, board: chess.Board):
+        self.board = board
+
+    def read_board(self, frame, orientation, theme, side_to_move="w"):
+        squares = [
+            SquareRead(chess.square_name(square), piece.symbol(), 0.99)
+            for square, piece in self.board.piece_map().items()
+        ]
+        return BoardRead(squares, True, self.board.fen())
+
+
+class _NoneEngine:
+    def analyze(self, fen):
+        return None
+
+
+def test_a_square_that_cannot_be_a_move_does_not_call_the_coach():
+    session, engine, llm = _session([board_image(chess.Board())])
+    for san in ("e4", "e5", "Nf3", "Bc5"):
+        session.game.apply(session.game.parse_san(san))
+    before = session.game.fen
+    wrong = session.game.board.copy()
+    wrong.remove_piece_at(chess.E5)
+    wrong.set_piece_at(chess.E5, chess.Piece.from_symbol("B"))
+    session.classifier = _StaticBoard(wrong)
+    session.tracker.last_image = board_image(session.game.board)
+    session._reconnect(0)
+    assert session.game.fen == before
+    assert engine.calls == 0
+    assert llm.prompts == []
+
+
+def test_a_configured_engine_that_stays_quiet_is_not_called_missing():
+    session, _, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1)
+    session.engine = _NoneEngine()
+    session.config.stockfish_path = r"C:\Games\stockfish.exe"
+    session._comment(Reason.MOVE_CONFIRMED, None)
+    assert session.messages[-1] == MSG_ENGINE_SILENT
+    assert MSG_NO_ENGINE not in session.messages
+    assert llm.prompts == []
+
+
+def test_the_coach_line_records_the_model_time(caplog):
+    import logging
+
+    session, _, llm = _session([board_image(chess.Board())], level=Level.LEVEL_1)
+    with caplog.at_level(logging.INFO, logger="chesscoach"):
+        session._comment(Reason.MOVE_CONFIRMED, None)
+    assert llm.prompts
+    assert any("llm_ms=" in record.message and "motor_ms=" in record.message for record in caplog.records)
+    assert any(record.message.startswith("gemini ") for record in caplog.records)
 
 
 def test_training_text_is_the_specified_copy():

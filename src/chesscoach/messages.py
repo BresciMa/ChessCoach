@@ -28,6 +28,7 @@ MSG_BOARD_LOST = "Perda do tabuleiro."
 MSG_BOARD_BACK = "Tabuleiro conectado."
 MSG_AMBIGUOUS = "Vi mais de um lance possível. Jogue de novo ou escreva o lance."
 MSG_NO_ENGINE = "O motor não está configurado. Indique o caminho do Stockfish."
+MSG_ENGINE_SILENT = "O motor não respondeu nesta posição."
 MSG_NO_KEY = "Falta a chave GEMINI_API_KEY. O coach não consegue escrever."
 MSG_SSL = (
     "Não consegui falar com o Gemini. A rede apresentou um certificado que o Python não reconhece. "
