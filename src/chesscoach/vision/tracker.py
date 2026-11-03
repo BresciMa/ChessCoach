@@ -267,6 +267,11 @@ class PositionTracker:
         self._occlusion = signature.copy()
         return TrackerResult(TrackerKind.BOARD_CHECK)
 
+    def changed_square_count(self) -> int:
+        if self._seen is None:
+            return 0
+        return len(self._changed(self._seen))
+
     def _changed(self, signature: np.ndarray) -> set[str]:
         if self._committed is None:
             return set()

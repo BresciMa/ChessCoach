@@ -422,6 +422,8 @@ class CoachSession:
         """O primeiro quadro da seta vira referência. O seguinte apaga a seta sem ser lido."""
         if not self._arrow:
             return False
+        if self.tracker.changed_square_count() > _ARROW_ABSORB_SQUARES:
+            return False
         if not self._arrow_baselined:
             image = self.tracker.last_image
             if image is None:
@@ -623,6 +625,7 @@ class CoachSession:
 
 
 _LOST_MEAN_CONFIDENCE = 0.35
+_ARROW_ABSORB_SQUARES = 8
 _LOOK_AGAIN_MS = 1000
 
 

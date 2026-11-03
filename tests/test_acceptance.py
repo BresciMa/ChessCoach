@@ -503,6 +503,33 @@ def test_a_still_window_wakes_when_the_known_board_returns():
     assert engine.calls == 0
 
 
+def test_a_covering_window_keeps_the_arrow_when_the_board_returns():
+    start = board_image(chess.Board())
+    cover = _cover(3)
+    session, engine, _ = _session(
+        [start, cover, cover, cover, cover, cover, start],
+        arrows=True,
+    )
+    session.poll(0)
+    session.preview_arrow(session.game.fen, "e4", [])
+    assert session.overlay_state().arrow == "e4"
+    session.poll(250)
+    session.poll(350)
+    assert session.poll(750) == [MSG_BOARD_LOST]
+    assert session.blind is True
+    assert session.overlay_state().arrow == "e4"
+    session.poll(1000)
+    session.poll(1250)
+    assert session.blind is True
+    assert session.overlay_state().arrow == "e4"
+    session.poll(1500)
+    assert session.blind is False
+    assert session.overlay_state().arrow == "e4"
+    assert MSG_BOARD_BACK not in session.messages
+    assert session.game.fen == chess.STARTING_FEN
+    assert engine.calls == 0
+
+
 def test_a_failed_read_is_tried_again_while_the_picture_stays():
     start = chess.Board()
     start.push_san("e4")
